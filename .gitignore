@@ -19,6 +19,7 @@ docs/book/src/docs
 
 # skip GoReleaser dist directory (root level only, not testdata)
 /dist
+vendor
 
 # skip .out files (coverage tests)
 *.out

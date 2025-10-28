@@ -17,7 +17,9 @@
 #
 # Makefile with some common workflow for dev, build and test
 #
-export GOPROXY?=https://proxy.golang.org/
+include hack/rules/custom.mk
+
+.DEFAULT_GOAL := help
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
