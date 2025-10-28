@@ -59,23 +59,30 @@ LD_FLAGS=-ldflags " \
     -X sigs.k8s.io/kubebuilder/v4/cmd.goarch=$(shell go env GOARCH) \
     -X sigs.k8s.io/kubebuilder/v4/cmd.gitCommit=$(shell git rev-parse HEAD) \
     -X sigs.k8s.io/kubebuilder/v4/cmd.buildDate=$(shell date -u +'%Y-%m-%dT%H:%M:%SZ') \
+"
 
+# 定义支持的平台
 PLATFORMS ?= linux/amd64 windows/386
-DISTTYPE = $(subst /, ,$@)
-GOOS = $(word 1, $(DISTTYPE))
-GOARCH = $(word 2, $(DISTTYPE))
 
-    "
-## 不支持交叉编译
 .PHONY: build
 build: $(PLATFORMS) ## Build the project locally
 $(PLATFORMS):
-	GOOS=$(GOOS) GOARCH=$(GOARCH) GO111MODULE=on CGO_ENABLED=0 go build $(LD_FLAGS) -o bin/kubebuilder.exe ./cmd
+	@$(eval DISTTYPE = $(subst /, ,$@))
+	@$(eval GOOS = $(word 1, $(DISTTYPE)))
+	@$(eval GOARCH = $(word 2, $(DISTTYPE)))
+	@$(eval BINARY_NAME = $(KUBEBUILDER_NAME)$(if $(filter windows,$(GOOS)),.exe,))
+	@echo Building for $(GOOS) platform, arch is $(GOARCH)...
+	@GOOS=$(GOOS) GOARCH=$(GOARCH) GO111MODULE=on CGO_ENABLED=0 go build $(LD_FLAGS) -o bin/$(KUBEBUILDER_NAME) .
 
 .PHONY: install
 install: build ## Build and install the binary with the current source code. Use it to test your changes locally.
 	rm -f $(GOBIN)/kubebuilder
 	cp ./bin/kubebuilder $(GOBIN)/kubebuilder
+
+.PHONY: clean
+clean: ## Clean
+	@rm -rf bin
+
 
 ##@ Development
 
