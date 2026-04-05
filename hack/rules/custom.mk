@@ -16,6 +16,11 @@ $(PLATFORMS):
 	@GOOS=$(GOOS) GOARCH=$(GOARCH) GO111MODULE=on CGO_ENABLED=0 go build $(LD_FLAGS) \
 	-o bin/$(BINARY_NAME) ./cmd/kubebuilder
 
+.PHONY: fmt
+fmt: ## Format
+	@echo "===> running fmt..."
+	@go fmt ./...
+
 .PHONY: clean
 clean: ## Clean
 	@rm -rf bin
