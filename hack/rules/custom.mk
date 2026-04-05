@@ -14,7 +14,7 @@ $(PLATFORMS):
 	@mkdir -p bin
 	@echo Building for $(GOOS) platform, arch is $(GOARCH)...
 	@GOOS=$(GOOS) GOARCH=$(GOARCH) GO111MODULE=on CGO_ENABLED=0 go build $(LD_FLAGS) \
-	-o bin/$(BINARY_NAME) .
+	-o bin/$(BINARY_NAME) ./cmd/kubebuilder
 
 .PHONY: clean
 clean: ## Clean
