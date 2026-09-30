@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"sigs.k8s.io/kubebuilder/v4/pkg/machinery"
@@ -77,7 +78,7 @@ func (f *WebhookTestUpdater) SetTemplateDefaults() error {
 	modified := false
 
 	// Check if we need to add validator variable and tests
-	validatorVar := fmt.Sprintf("validator %sCustomValidator", f.Resource.Kind)
+	validatorVar := fmt.Sprintf("validator %sValidator", f.Resource.Kind)
 	if f.Resource.HasValidationWebhook() && !bytes.Contains(content, []byte(validatorVar)) {
 		fileContent = f.addValidatorVariable(fileContent)
 		fileContent = f.addValidatorInit(fileContent)
@@ -86,7 +87,7 @@ func (f *WebhookTestUpdater) SetTemplateDefaults() error {
 	}
 
 	// Check if we need to add defaulter variable and tests
-	defaulterVar := fmt.Sprintf("defaulter %sCustomDefaulter", f.Resource.Kind)
+	defaulterVar := fmt.Sprintf("defaulter %sDefaulter", f.Resource.Kind)
 	if f.Resource.HasDefaultingWebhook() && !bytes.Contains(content, []byte(defaulterVar)) {
 		fileContent = f.addDefaulterVariable(fileContent)
 		fileContent = f.addDefaulterInit(fileContent)
@@ -114,14 +115,14 @@ func (f *WebhookTestUpdater) SetTemplateDefaults() error {
 // addValidatorVariable adds the validator variable to the var block
 func (f *WebhookTestUpdater) addValidatorVariable(content string) string {
 	varName := "validator"
-	typeName := f.Resource.Kind + "CustomValidator"
+	typeName := f.Resource.Kind + "Validator"
 	return f.addVariableToBlock(content, varName, typeName)
 }
 
 // addDefaulterVariable adds the defaulter variable to the var block
 func (f *WebhookTestUpdater) addDefaulterVariable(content string) string {
 	varName := "defaulter"
-	typeName := f.Resource.Kind + "CustomDefaulter"
+	typeName := f.Resource.Kind + "Defaulter"
 	return f.addVariableToBlock(content, varName, typeName)
 }
 
@@ -155,8 +156,8 @@ func (f *WebhookTestUpdater) addVariableToBlock(content, varName, typeName strin
 // detectIndentationInBlock extracts indentation from existing code
 func (f *WebhookTestUpdater) detectIndentationInBlock(blockContent string) string {
 	lines := strings.Split(blockContent, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := lines[i]
+	for _, v := range slices.Backward(lines) {
+		line := v
 		trimmed := strings.TrimSpace(line)
 		if trimmed != "" && trimmed != "var" && trimmed != "(" {
 			trimmedLeft := strings.TrimLeft(line, " \t")
@@ -171,14 +172,14 @@ func (f *WebhookTestUpdater) detectIndentationInBlock(blockContent string) strin
 // addValidatorInit adds validator initialization in BeforeEach
 func (f *WebhookTestUpdater) addValidatorInit(content string) string {
 	varName := "validator"
-	typeName := f.Resource.Kind + "CustomValidator"
+	typeName := f.Resource.Kind + "Validator"
 	return f.addWebhookInit(content, varName, typeName)
 }
 
 // addDefaulterInit adds defaulter initialization in BeforeEach
 func (f *WebhookTestUpdater) addDefaulterInit(content string) string {
 	varName := "defaulter"
-	typeName := f.Resource.Kind + "CustomDefaulter"
+	typeName := f.Resource.Kind + "Defaulter"
 	return f.addWebhookInit(content, varName, typeName)
 }
 

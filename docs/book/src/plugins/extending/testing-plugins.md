@@ -1,4 +1,4 @@
-# Write E2E Tests
+# Write E2E tests
 
 You can check the [Kubebuilder/v4/test/e2e/utils][utils-kb] package, which offers `TestContext` with rich methods:
 
@@ -32,7 +32,7 @@ Once defined, you can use `TestContext` to:
 - [kubebuilder e2e tests][kb-e2e-tests]
 
 
-## Generate Test Samples
+## Generate test samples
 
 It's straightforward to view the content of sample projects generated
 by your plugin.
@@ -83,7 +83,7 @@ Here’s a general workflow to create a sample project using the `go/v4` plugin 
   	"--defaulting",
   	"--programmatic-validation",
   )
-  Expect(err).NotTo(HaveOccurred(), "Failed to create an webhook")
+  Expect(err).NotTo(HaveOccurred(), "Failed to create a webhook")
   ```
 
 [cert-manager-install]: https://pkg.go.dev/sigs.k8s.io/kubebuilder/v4/test/e2e/utils#TestContext.InstallCertManager

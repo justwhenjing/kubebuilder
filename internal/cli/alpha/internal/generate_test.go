@@ -94,6 +94,18 @@ type fakeStore struct {
 
 func (f *fakeStore) Config() config.Config { return f.cfg }
 
+const (
+	exampleDomain      = "example.com"
+	fooKind            = "Foo"
+	exampleKind        = "Example"
+	fixtureTest        = "test"
+	certManagerAPIPath = "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	certificateKind    = "Certificate"
+	certManagerGroup   = "cert-manager"
+	examplesDir        = "examples"
+	exampleRepo        = "github.com/example/repo"
+)
+
 func TestGenerateHelpers(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Generate helpers Suite")
@@ -333,43 +345,48 @@ var _ = Describe("generate: file-helpers", func() {
 })
 
 var _ = Describe("generate: get-args-helpers", func() {
+	const (
+		fooDomain = "foo.com"
+		barRepo   = "bar"
+	)
+
 	// getInitArgs
 	Describe("getInitArgs", func() {
 		Context("for outdated plugins", func() {
 			When("v3 plugin is used", func() {
 				It("should return correct args for plugins, domain, repo", func() {
-					cfg := &fakeConfig{pluginChain: []string{"go.kubebuilder.io/v3"}, domain: "foo.com", repo: "bar"}
+					cfg := &fakeConfig{pluginChain: []string{"go.kubebuilder.io/v3"}, domain: fooDomain, repo: barRepo}
 					store := &fakeStore{cfg: cfg}
-					args := getInitArgs(store, &Generate{SkipGoVersionCheck: true})
-					Expect(args).To(ContainElements("--skip-go-version-check", "--plugins", ContainSubstring("go.kubebuilder.io/v4"),
-						"--domain", "foo.com", "--repo", "bar"))
+					args := getInitArgs(store, &Generate{SkipGoVersionCheck: true}, "")
+					Expect(args).To(ContainElements("--skip-go-version-check", flagPlugins, ContainSubstring(pluginGoKubebuilderV4),
+						"--domain", fooDomain, "--repo", barRepo))
 				})
 			})
 
 			When("alpha plugin is used", func() {
 				It("should return correct args for plugins, domain, repo", func() {
-					cfg := &fakeConfig{pluginChain: []string{"go.kubebuilder.io/v3-alpha"}, domain: "foo.com", repo: "bar"}
+					cfg := &fakeConfig{pluginChain: []string{"go.kubebuilder.io/v3-alpha"}, domain: fooDomain, repo: barRepo}
 					store := &fakeStore{cfg: cfg}
-					args := getInitArgs(store, &Generate{SkipGoVersionCheck: true})
-					Expect(args).To(ContainElements("--skip-go-version-check", "--plugins", ContainSubstring("go.kubebuilder.io/v4"),
-						"--domain", "foo.com", "--repo", "bar"))
+					args := getInitArgs(store, &Generate{SkipGoVersionCheck: true}, "")
+					Expect(args).To(ContainElements("--skip-go-version-check", flagPlugins, ContainSubstring(pluginGoKubebuilderV4),
+						"--domain", fooDomain, "--repo", barRepo))
 				})
 			})
 
 			When("helm v1-alpha plugin is used", func() {
 				It("should replace with helm v2-alpha", func() {
 					cfg := &fakeConfig{
-						pluginChain: []string{"go.kubebuilder.io/v4", "helm.kubebuilder.io/v1-alpha"},
-						domain:      "foo.com",
-						repo:        "bar",
+						pluginChain: []string{pluginGoKubebuilderV4, pluginHelmKubebuilderV1Alpha},
+						domain:      fooDomain,
+						repo:        barRepo,
 					}
 					store := &fakeStore{cfg: cfg}
-					args := getInitArgs(store, &Generate{SkipGoVersionCheck: true})
+					args := getInitArgs(store, &Generate{SkipGoVersionCheck: true}, "")
 					Expect(args).To(ContainElements(
 						"--skip-go-version-check",
-						"--plugins", ContainSubstring("helm.kubebuilder.io/v2-alpha"),
-						"--domain", "foo.com", "--repo", "bar"))
-					Expect(args).NotTo(ContainElement(ContainSubstring("helm.kubebuilder.io/v1-alpha")))
+						flagPlugins, ContainSubstring(pluginHelmKubebuilderV2Alpha),
+						"--domain", fooDomain, "--repo", barRepo))
+					Expect(args).NotTo(ContainElement(ContainSubstring(pluginHelmKubebuilderV1Alpha)))
 				})
 			})
 		})
@@ -377,84 +394,84 @@ var _ = Describe("generate: get-args-helpers", func() {
 		Context("for latest plugins", func() {
 			When("latest plugin (v4) is used", func() {
 				It("returns correct args for plugins, domain, repo", func() {
-					cfg := &fakeConfig{pluginChain: []string{"go.kubebuilder.io/v4"}, domain: "foo.com", repo: "bar"}
+					cfg := &fakeConfig{pluginChain: []string{pluginGoKubebuilderV4}, domain: fooDomain, repo: barRepo}
 					store := &fakeStore{cfg: cfg}
-					args := getInitArgs(store, &Generate{SkipGoVersionCheck: true})
-					Expect(args).To(ContainElements("--skip-go-version-check", "--plugins", ContainSubstring("go.kubebuilder.io/v4"),
-						"--domain", "foo.com", "--repo", "bar"))
+					args := getInitArgs(store, &Generate{SkipGoVersionCheck: true}, "")
+					Expect(args).To(ContainElements("--skip-go-version-check", flagPlugins, ContainSubstring(pluginGoKubebuilderV4),
+						"--domain", fooDomain, "--repo", barRepo))
 				})
 			})
 
 			When("project name is set", func() {
 				It("returns correct args including project name", func() {
 					cfg := &fakeConfig{
-						pluginChain: []string{"go.kubebuilder.io/v4"},
-						domain:      "foo.com",
-						repo:        "bar",
+						pluginChain: []string{pluginGoKubebuilderV4},
+						domain:      fooDomain,
+						repo:        barRepo,
 						projectName: "my-project",
 					}
 					store := &fakeStore{cfg: cfg}
-					args := getInitArgs(store, &Generate{SkipGoVersionCheck: true})
-					Expect(args).To(ContainElements("--skip-go-version-check", "--plugins", ContainSubstring("go.kubebuilder.io/v4"),
-						"--domain", "foo.com", "--repo", "bar", "--project-name", "my-project"))
+					args := getInitArgs(store, &Generate{SkipGoVersionCheck: true}, "")
+					Expect(args).To(ContainElements("--skip-go-version-check", flagPlugins, ContainSubstring(pluginGoKubebuilderV4),
+						"--domain", fooDomain, "--repo", barRepo, "--project-name", "my-project"))
 				})
 			})
 
 			When("multigroup flag is enabled", func() {
 				It("includes --multigroup in init args", func() {
 					cfg := &fakeConfig{
-						pluginChain: []string{"go.kubebuilder.io/v4"},
-						domain:      "foo.com",
-						repo:        "bar",
+						pluginChain: []string{pluginGoKubebuilderV4},
+						domain:      fooDomain,
+						repo:        barRepo,
 						multigroup:  true,
 					}
 					store := &fakeStore{cfg: cfg}
-					args := getInitArgs(store, &Generate{SkipGoVersionCheck: true})
-					Expect(args).To(ContainElements("--skip-go-version-check", "--plugins", ContainSubstring("go.kubebuilder.io/v4"),
-						"--domain", "foo.com", "--repo", "bar", "--multigroup"))
+					args := getInitArgs(store, &Generate{SkipGoVersionCheck: true}, "")
+					Expect(args).To(ContainElements("--skip-go-version-check", flagPlugins, ContainSubstring(pluginGoKubebuilderV4),
+						"--domain", fooDomain, "--repo", barRepo, "--multigroup"))
 				})
 			})
 
 			When("namespaced flag is enabled", func() {
 				It("includes --namespaced in init args", func() {
 					cfg := &fakeConfig{
-						pluginChain: []string{"go.kubebuilder.io/v4"},
-						domain:      "foo.com",
-						repo:        "bar",
+						pluginChain: []string{pluginGoKubebuilderV4},
+						domain:      fooDomain,
+						repo:        barRepo,
 						namespaced:  true,
 					}
 					store := &fakeStore{cfg: cfg}
-					args := getInitArgs(store, &Generate{SkipGoVersionCheck: true})
-					Expect(args).To(ContainElements("--skip-go-version-check", "--plugins", ContainSubstring("go.kubebuilder.io/v4"),
-						"--domain", "foo.com", "--repo", "bar", "--namespaced"))
+					args := getInitArgs(store, &Generate{SkipGoVersionCheck: true}, "")
+					Expect(args).To(ContainElements("--skip-go-version-check", flagPlugins, ContainSubstring(pluginGoKubebuilderV4),
+						"--domain", fooDomain, "--repo", barRepo, "--namespaced"))
 				})
 			})
 
 			When("both multigroup and namespaced are enabled", func() {
 				It("includes both flags in init args", func() {
 					cfg := &fakeConfig{
-						pluginChain: []string{"go.kubebuilder.io/v4"},
-						domain:      "foo.com",
-						repo:        "bar",
+						pluginChain: []string{pluginGoKubebuilderV4},
+						domain:      fooDomain,
+						repo:        barRepo,
 						multigroup:  true,
 						namespaced:  true,
 					}
 					store := &fakeStore{cfg: cfg}
-					args := getInitArgs(store, &Generate{SkipGoVersionCheck: true})
-					Expect(args).To(ContainElements("--skip-go-version-check", "--plugins", ContainSubstring("go.kubebuilder.io/v4"),
-						"--domain", "foo.com", "--repo", "bar", "--multigroup", "--namespaced"))
+					args := getInitArgs(store, &Generate{SkipGoVersionCheck: true}, "")
+					Expect(args).To(ContainElements("--skip-go-version-check", flagPlugins, ContainSubstring(pluginGoKubebuilderV4),
+						"--domain", fooDomain, "--repo", barRepo, "--multigroup", "--namespaced"))
 				})
 			})
 		})
 
 		Context("when skipGoVersionCheck is false", func() {
 			It("does not include --skip-go-version-check", func() {
-				cfg := &fakeConfig{pluginChain: []string{"go.kubebuilder.io/v4"}, domain: "foo.com", repo: "bar"}
+				cfg := &fakeConfig{pluginChain: []string{pluginGoKubebuilderV4}, domain: fooDomain, repo: barRepo}
 				store := &fakeStore{cfg: cfg}
-				args := getInitArgs(store, &Generate{SkipGoVersionCheck: false})
+				args := getInitArgs(store, &Generate{SkipGoVersionCheck: false}, "")
 				Expect(args).NotTo(ContainElement("--skip-go-version-check"))
-				Expect(args).To(ContainElements("--plugins", ContainSubstring("go.kubebuilder.io/v4"),
-					"--domain", "foo.com", "--repo", "bar"))
+				Expect(args).To(ContainElements(flagPlugins, ContainSubstring(pluginGoKubebuilderV4),
+					"--domain", fooDomain, "--repo", barRepo))
 			})
 		})
 	})
@@ -463,20 +480,22 @@ var _ = Describe("generate: get-args-helpers", func() {
 	Context("getGVKFlags", func() {
 		It("returns correct flags", func() {
 			res := resource.Resource{Plural: "foos"}
-			res.Group = "example.com"
+			res.Group = exampleDomain
 			res.Version = "v1"
-			res.Kind = "Foo"
+			res.Kind = fooKind
 			flags := getGVKFlags(res)
-			Expect(flags).To(ContainElements("--plural", "foos", "--group", "example.com", "--version", "v1", "--kind", "Foo"))
+			Expect(flags).To(ContainElements(
+				"--plural", "foos", "--group", exampleDomain, "--version", "v1", "--kind", fooKind,
+			))
 		})
 	})
 
 	// getGVKFlagsFromDeployImage
 	Context("getGVKFlagsFromDeployImage", func() {
 		It("returns correct flags", func() {
-			rd := deployimagev1alpha1.ResourceData{Group: "example.com", Version: "v1", Kind: "Foo"}
+			rd := deployimagev1alpha1.ResourceData{Group: exampleDomain, Version: "v1", Kind: fooKind}
 			flags := getGVKFlagsFromDeployImage(rd)
-			Expect(flags).To(ContainElements("--group", "example.com", "--version", "v1", "--kind", "Foo"))
+			Expect(flags).To(ContainElements("--group", exampleDomain, "--version", "v1", "--kind", fooKind))
 		})
 	})
 
@@ -487,12 +506,12 @@ var _ = Describe("generate: get-args-helpers", func() {
 			rd.Options.Image = "test-kubebuilder"
 			rd.Options.ContainerCommand = "echo 'Hello'"
 			rd.Options.ContainerPort = "8000"
-			rd.Options.RunAsUser = "test"
+			rd.Options.RunAsUser = fixtureTest
 			opts := getDeployImageOptions(rd)
 			Expect(opts).To(ContainElements("--image=test-kubebuilder",
 				"--image-container-command=echo 'Hello'",
 				"--image-container-port=8000",
-				"--run-as-user=test",
+				"--run-as-user="+fixtureTest,
 				"--plugins=deploy-image.go.kubebuilder.io/v1-alpha"))
 		})
 	})
@@ -521,14 +540,39 @@ var _ = Describe("generate: get-args-helpers", func() {
 				Expect(getAPIResourceFlags(res)).To(ContainElements("--resource", "--namespaced=false", "--controller=false"))
 			})
 		})
+
+		Context("for Server-Side Apply", func() {
+			It("includes --ssa only when SSA is enabled on the resource", func() {
+				res.API.CRDVersion = "v1"
+				res.API.Namespaced = true
+				res.API.SSA = true
+				Expect(getAPIResourceFlags(res)).To(ContainElements(
+					"--resource", "--namespaced", "--ssa", "--controller=false"))
+			})
+
+			It("omits --ssa when SSA is disabled on the resource", func() {
+				res.API.CRDVersion = "v1"
+				res.API.Namespaced = true
+				res.API.SSA = false
+				Expect(getAPIResourceFlags(res)).NotTo(ContainElement("--ssa"))
+			})
+
+			It("omits --ssa for resource-less entries (--resource=false)", func() {
+				// A nil API means --resource=false; --ssa must never be emitted.
+				res.API = nil
+				flags := getAPIResourceFlags(res)
+				Expect(flags).To(ContainElement("--resource=false"))
+				Expect(flags).NotTo(ContainElement("--ssa"))
+			})
+		})
 	})
 
 	// getWebhookResourceFlags
 	Context("getWebhookResourceFlags", func() {
 		It("returns correct flags for specified resources", func() {
 			res := resource.Resource{
-				Path:     "external/test",
-				GVK:      resource.GVK{Group: "example.com", Version: "v1", Kind: "Example", Domain: "test"},
+				Path:     certManagerAPIPath,
+				GVK:      resource.GVK{Group: exampleDomain, Version: "v1", Kind: exampleKind, Domain: fixtureTest},
 				External: true,
 				Webhooks: &resource.Webhooks{
 					Validation: true,
@@ -538,15 +582,18 @@ var _ = Describe("generate: get-args-helpers", func() {
 				},
 			}
 			flags := getWebhookResourceFlags(res)
-			Expect(flags).To(ContainElements("--external-api-path", "external/test", "--external-api-domain", "test",
-				"--programmatic-validation", "--defaulting", "--conversion", "--spoke", "v2"))
+			Expect(flags).To(ContainElements(
+				"--external-api-path", certManagerAPIPath,
+				"--external-api-domain", fixtureTest,
+				"--programmatic-validation", "--defaulting", "--conversion", "--spoke", "v2",
+			))
 		})
 
 		It("returns correct flags for external resources with module version", func() {
 			res := resource.Resource{
-				Path:     "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1",
+				Path:     certManagerAPIPath,
 				Module:   "github.com/cert-manager/cert-manager@v1.18.2",
-				GVK:      resource.GVK{Group: "cert-manager", Version: "v1", Kind: "Certificate", Domain: "io"},
+				GVK:      resource.GVK{Group: certManagerGroup, Version: "v1", Kind: certificateKind, Domain: "io"},
 				External: true,
 				Webhooks: &resource.Webhooks{
 					Defaulting: true,
@@ -554,7 +601,7 @@ var _ = Describe("generate: get-args-helpers", func() {
 			}
 			flags := getWebhookResourceFlags(res)
 			Expect(flags).To(ContainElement("--external-api-path"))
-			Expect(flags).To(ContainElement("github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"))
+			Expect(flags).To(ContainElement(certManagerAPIPath))
 			Expect(flags).To(ContainElement("--external-api-domain"))
 			Expect(flags).To(ContainElement("io"))
 			Expect(flags).To(ContainElement("--external-api-module"))
@@ -564,9 +611,9 @@ var _ = Describe("generate: get-args-helpers", func() {
 
 		It("returns correct flags for external resources WITHOUT module version", func() {
 			res := resource.Resource{
-				Path:     "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1",
+				Path:     certManagerAPIPath,
 				Module:   "", // No module specified
-				GVK:      resource.GVK{Group: "cert-manager", Version: "v1", Kind: "Certificate", Domain: "io"},
+				GVK:      resource.GVK{Group: certManagerGroup, Version: "v1", Kind: certificateKind, Domain: "io"},
 				External: true,
 				Webhooks: &resource.Webhooks{
 					Defaulting: true,
@@ -574,7 +621,7 @@ var _ = Describe("generate: get-args-helpers", func() {
 			}
 			flags := getWebhookResourceFlags(res)
 			Expect(flags).To(ContainElement("--external-api-path"))
-			Expect(flags).To(ContainElement("github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"))
+			Expect(flags).To(ContainElement(certManagerAPIPath))
 			Expect(flags).To(ContainElement("--external-api-domain"))
 			Expect(flags).To(ContainElement("io"))
 			Expect(flags).NotTo(ContainElement("--external-api-module"))
@@ -612,8 +659,8 @@ var _ = Describe("generate: create-helpers", func() {
 		Context("Without External flag", func() {
 			It("runs kubebuilder create api successfully for a resource", func() {
 				res := resource.Resource{
-					GVK:        resource.GVK{Group: "example.com", Version: "v1", Kind: "Example", Domain: "test"},
-					Plural:     "examples",
+					GVK:        resource.GVK{Group: exampleDomain, Version: "v1", Kind: exampleKind, Domain: fixtureTest},
+					Plural:     examplesDir,
 					API:        &resource.API{Namespaced: true},
 					Controller: true,
 				}
@@ -625,12 +672,12 @@ var _ = Describe("generate: create-helpers", func() {
 		Context("With External flag set", func() {
 			It("runs kubebuilder create api successfully for a resource", func() {
 				res := resource.Resource{
-					GVK:        resource.GVK{Group: "example.com", Version: "v1", Kind: "Example", Domain: "external"},
-					Plural:     "examples",
+					GVK:        resource.GVK{Group: exampleDomain, Version: "v1", Kind: exampleKind, Domain: "external"},
+					Plural:     examplesDir,
 					API:        &resource.API{Namespaced: true},
 					Controller: true,
 					External:   true,
-					Path:       "external/path",
+					Path:       certManagerAPIPath,
 				}
 				// Run createAPI and verify no errors
 				Expect(createAPI(res)).To(Succeed())
@@ -638,12 +685,12 @@ var _ = Describe("generate: create-helpers", func() {
 
 			It("runs kubebuilder create api successfully with module version", func() {
 				res := resource.Resource{
-					GVK:        resource.GVK{Group: "cert-manager", Version: "v1", Kind: "Certificate", Domain: "io"},
+					GVK:        resource.GVK{Group: certManagerGroup, Version: "v1", Kind: certificateKind, Domain: "io"},
 					Plural:     "certificates",
 					API:        nil, // External resources typically don't scaffold API
 					Controller: true,
 					External:   true,
-					Path:       "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1",
+					Path:       certManagerAPIPath,
 					Module:     "github.com/cert-manager/cert-manager@v1.18.2",
 				}
 				// Run createAPI and verify no errors
@@ -652,12 +699,12 @@ var _ = Describe("generate: create-helpers", func() {
 
 			It("runs kubebuilder create api successfully WITHOUT module version", func() {
 				res := resource.Resource{
-					GVK:        resource.GVK{Group: "cert-manager", Version: "v1", Kind: "Certificate", Domain: "io"},
+					GVK:        resource.GVK{Group: certManagerGroup, Version: "v1", Kind: certificateKind, Domain: "io"},
 					Plural:     "certificates",
 					API:        nil,
 					Controller: true,
 					External:   true,
-					Path:       "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1",
+					Path:       certManagerAPIPath,
 					Module:     "", // No module specified
 				}
 				// Run createAPI and verify no errors
@@ -670,8 +717,8 @@ var _ = Describe("generate: create-helpers", func() {
 	Describe("createWebhook", func() {
 		It("runs kubebuilder create webhook successfully for a resource", func() {
 			res := resource.Resource{
-				GVK:      resource.GVK{Group: "example.com", Version: "v1", Kind: "Example", Domain: "test"},
-				Plural:   "examples",
+				GVK:      resource.GVK{Group: exampleDomain, Version: "v1", Kind: exampleKind, Domain: fixtureTest},
+				Plural:   examplesDir,
 				Webhooks: &resource.Webhooks{WebhookVersion: "v1"},
 			}
 			// Run createWebhook and verify no errors
@@ -680,8 +727,8 @@ var _ = Describe("generate: create-helpers", func() {
 
 		It("ignores web creation if webhook resource is empty", func() {
 			res := resource.Resource{
-				GVK:      resource.GVK{Group: "example.com", Version: "v1", Kind: "Example", Domain: "test"},
-				Plural:   "examples",
+				GVK:      resource.GVK{Group: exampleDomain, Version: "v1", Kind: exampleKind, Domain: fixtureTest},
+				Plural:   examplesDir,
 				Webhooks: &resource.Webhooks{},
 			}
 			// Run createWebhook and verify no errors
@@ -692,9 +739,9 @@ var _ = Describe("generate: create-helpers", func() {
 	Describe("createAPIWithDeployImage", func() {
 		It("runs kubebuilder create api successfully with deploy image", func() {
 			resourceData := deployimagev1alpha1.ResourceData{
-				Group:   "example.com",
+				Group:   exampleDomain,
 				Version: "v1",
-				Kind:    "Example",
+				Kind:    exampleKind,
 			}
 			resourceData.Options.Image = "example-image"
 			resourceData.Options.ContainerCommand = "run"
@@ -708,10 +755,10 @@ var _ = Describe("generate: create-helpers", func() {
 			// This test validates that deploy-image plugin can work with external APIs
 			// even without pinned versions (backward compatibility)
 			resourceData := deployimagev1alpha1.ResourceData{
-				Group:   "cert-manager",
+				Group:   certManagerGroup,
 				Domain:  "io",
 				Version: "v1",
-				Kind:    "Certificate",
+				Kind:    certificateKind,
 			}
 			resourceData.Options.Image = "busybox:1.36.1"
 			resourceData.Options.RunAsUser = "1001"
@@ -724,7 +771,7 @@ var _ = Describe("generate: create-helpers", func() {
 			// deploy-image plugin still works correctly
 			// Note: The release field is stored in the Resource, not in DeployImage's ResourceData
 			resourceData := deployimagev1alpha1.ResourceData{
-				Group:   "example.com",
+				Group:   exampleDomain,
 				Version: "v1",
 				Kind:    "Memcached",
 			}
@@ -776,12 +823,12 @@ var _ = Describe("generate: kubebuilder", func() {
 	Context("kubebuilderInit", func() {
 		It("runs kubebuilder init successfully", func() {
 			cfg := &fakeConfig{
-				pluginChain: []string{"go.kubebuilder.io/v4"},
-				domain:      "example.com",
-				repo:        "github.com/example/repo",
+				pluginChain: []string{pluginGoKubebuilderV4},
+				domain:      exampleDomain,
+				repo:        exampleRepo,
 			}
 			store := &fakeStore{cfg: cfg}
-			Expect(kubebuilderInit(store, &Generate{SkipGoVersionCheck: true})).To(Succeed())
+			Expect(kubebuilderInit(store, &Generate{SkipGoVersionCheck: true}, "")).To(Succeed())
 		})
 	})
 
@@ -789,12 +836,11 @@ var _ = Describe("generate: kubebuilder", func() {
 		It("runs kubebuilder create successfully for resources", func() {
 			cfg := &fakeConfig{
 				resources: []resource.Resource{
-					{Plural: "foos", GVK: resource.GVK{Group: "example.com", Version: "v1", Kind: "Foo"}},
-					{Plural: "bars", GVK: resource.GVK{Group: "example.com", Version: "v1", Kind: "Bar"}},
+					{Plural: "foos", GVK: resource.GVK{Group: exampleDomain, Version: "v1", Kind: fooKind}},
+					{Plural: "bars", GVK: resource.GVK{Group: exampleDomain, Version: "v1", Kind: "Bar"}},
 				},
 			}
 			store := &fakeStore{cfg: cfg}
-			// Run kubebuilderCreate and verify no errors
 			Expect(kubebuilderCreate(store)).To(Succeed())
 		})
 	})
@@ -816,7 +862,7 @@ var _ = Describe("generate: kubebuilder", func() {
 
 var _ = Describe("generate: hasHelmPlugin", func() {
 	It("returns true if v2-alpha plugin present", func() {
-		cfg := &fakeConfig{plugins: map[string]any{"helm.kubebuilder.io/v2-alpha": true}}
+		cfg := &fakeConfig{plugins: map[string]any{pluginHelmKubebuilderV2Alpha: true}}
 		store := &fakeStore{cfg: cfg}
 		hasPlugin, isV2Alpha := hasHelmPlugin(store)
 		Expect(hasPlugin).To(BeTrue())
@@ -824,7 +870,7 @@ var _ = Describe("generate: hasHelmPlugin", func() {
 	})
 
 	It("returns true if v1-alpha plugin present", func() {
-		cfg := &fakeConfig{plugins: map[string]any{"helm.kubebuilder.io/v1-alpha": true}}
+		cfg := &fakeConfig{plugins: map[string]any{pluginHelmKubebuilderV1Alpha: true}}
 		store := &fakeStore{cfg: cfg}
 		hasPlugin, isV2Alpha := hasHelmPlugin(store)
 		Expect(hasPlugin).To(BeTrue())
@@ -840,7 +886,81 @@ var _ = Describe("generate: hasHelmPlugin", func() {
 	})
 })
 
+var _ = Describe("generate: boilerplate preservation", func() {
+	Describe("getInitArgs with boilerplate handling", func() {
+		It("should include --license none when no boilerplate exists", func() {
+			cfg := &fakeConfig{
+				pluginChain: []string{pluginGoKubebuilderV4},
+				domain:      exampleDomain,
+				repo:        exampleRepo,
+			}
+			store := &fakeStore{cfg: cfg}
+			args := getInitArgs(store, &Generate{}, "") // tempLicenseFile = "" (no boilerplate)
+
+			Expect(args).To(ContainElement("--license"))
+			// Find --license and verify next element is "none"
+			foundLicenseNone := false
+			for i, arg := range args {
+				if arg == "--license" && i+1 < len(args) && args[i+1] == "none" {
+					foundLicenseNone = true
+					break
+				}
+			}
+			Expect(foundLicenseNone).To(BeTrue(), "Expected --license none when no boilerplate exists")
+		})
+
+		It("should use --license-file when temp file is provided", func() {
+			cfg := &fakeConfig{
+				pluginChain: []string{pluginGoKubebuilderV4},
+				domain:      exampleDomain,
+				repo:        exampleRepo,
+			}
+			store := &fakeStore{cfg: cfg}
+			args := getInitArgs(store, &Generate{}, "/tmp/preserved-license.txt") // tempLicenseFile provided
+
+			// Should have --license-file flag (not --license none)
+			Expect(args).To(ContainElement("--license-file"))
+			Expect(args).To(ContainElement("/tmp/preserved-license.txt"))
+
+			// Should NOT have --license none
+			foundLicenseNone := false
+			for i, arg := range args {
+				if arg == "--license" && i+1 < len(args) && args[i+1] == "none" {
+					foundLicenseNone = true
+					break
+				}
+			}
+			Expect(foundLicenseNone).To(BeFalse(), "Should not use --license none when temp file is provided")
+		})
+
+		It("should always include either --license-file or --license none", func() {
+			cfg := &fakeConfig{
+				pluginChain: []string{pluginGoKubebuilderV4},
+				domain:      exampleDomain,
+				repo:        exampleRepo,
+			}
+			store := &fakeStore{cfg: cfg}
+
+			// With temp file: should have --license-file
+			argsWithFile := getInitArgs(store, &Generate{}, "/tmp/custom-license.txt")
+			Expect(argsWithFile).To(ContainElement("--license-file"))
+			Expect(argsWithFile).To(ContainElement("/tmp/custom-license.txt"))
+
+			// Without temp file: should have --license none
+			argsWithoutFile := getInitArgs(store, &Generate{}, "")
+			Expect(argsWithoutFile).To(ContainElement("--license"))
+			Expect(argsWithoutFile).To(ContainElement("none"))
+		})
+	})
+})
+
 var _ = Describe("generate: migrate-plugins", func() {
+	const (
+		grafanaPluginKey     = "grafana.kubebuilder.io/v1-alpha"
+		autoupdatePluginKey  = "autoupdate.kubebuilder.io/v1-alpha"
+		deployImagePluginKey = "deploy-image.kubebuilder.io/v1-alpha"
+	)
+
 	var (
 		kbc         *utils.TestContext
 		tmpDir      string
@@ -869,18 +989,18 @@ var _ = Describe("generate: migrate-plugins", func() {
 
 	Context("migrateGrafanaPlugin", func() {
 		It("skips migration as Grafana plugin not found", func() {
-			cfg := &fakeConfig{pluginErr: &config.PluginKeyNotFoundError{Key: "grafana.kubebuilder.io/v1-alpha"}}
+			cfg := &fakeConfig{pluginErr: &config.PluginKeyNotFoundError{Key: grafanaPluginKey}}
 			store := &fakeStore{cfg: cfg}
-			Expect(migrateGrafanaPlugin(store, "src", "dest")).To(Succeed())
+			Expect(migrateGrafanaPlugin(store, "src", "dest", nil, false)).To(Succeed())
 		})
 
 		It("returns error if decoding Grafana plugin config fails", func() {
 			cfg := &fakeConfig{
 				pluginErr: fmt.Errorf("decoding error"),
-				plugins:   map[string]any{"grafana.kubebuilder.io/v1-alpha": true},
+				plugins:   map[string]any{grafanaPluginKey: true},
 			}
 			store := &fakeStore{cfg: cfg}
-			Expect(migrateGrafanaPlugin(store, "src", "dest")).NotTo(Succeed())
+			Expect(migrateGrafanaPlugin(store, "src", "dest", nil, false)).NotTo(Succeed())
 		})
 
 		Context("success", func() {
@@ -900,19 +1020,53 @@ var _ = Describe("generate: migrate-plugins", func() {
 			})
 
 			It("migrates Grafana plugin successfully", func() {
-				cfg := &fakeConfig{plugins: map[string]any{"grafana.kubebuilder.io/v1-alpha": true}}
+				cfg := &fakeConfig{plugins: map[string]any{grafanaPluginKey: true}}
 				store := &fakeStore{cfg: cfg}
-				Expect(migrateGrafanaPlugin(store, src, dest)).To(Succeed())
+				Expect(migrateGrafanaPlugin(store, src, dest, nil, false)).To(Succeed())
 				b, err := os.ReadFile(filepath.Join(dest, "grafana/custom-metrics/config.yaml"))
 				Expect(err).NotTo(HaveOccurred())
 				Expect(string(b)).To(Equal("config"))
+			})
+
+			It("restores the preserved config on an in-place regeneration", func() {
+				// src == dest and the file on disk holds a freshly scaffolded
+				// default: the state after cleanOutputDirPreservingGit and
+				// kubebuilderGrafanaEdit have both run. Only the preserved
+				// content read before the cleanup carries the customisation.
+				cfg := &fakeConfig{plugins: map[string]any{grafanaPluginKey: true}}
+				store := &fakeStore{cfg: cfg}
+				Expect(migrateGrafanaPlugin(store, src, src, []byte("customised"), true)).To(Succeed())
+				b, err := os.ReadFile(filepath.Join(src, "grafana/custom-metrics/config.yaml"))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(string(b)).To(Equal("customised"))
+			})
+
+			It("restores an empty config on an in-place regeneration", func() {
+				// An existing empty config.yaml is a customisation too: the
+				// user emptied it on purpose, so the restore must not leave
+				// the scaffolded default behind.
+				cfg := &fakeConfig{plugins: map[string]any{grafanaPluginKey: true}}
+				store := &fakeStore{cfg: cfg}
+				Expect(migrateGrafanaPlugin(store, src, src, nil, true)).To(Succeed())
+				b, err := os.ReadFile(filepath.Join(src, "grafana/custom-metrics/config.yaml"))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(b).To(BeEmpty())
+			})
+
+			It("prefers the preserved config over the source file", func() {
+				cfg := &fakeConfig{plugins: map[string]any{grafanaPluginKey: true}}
+				store := &fakeStore{cfg: cfg}
+				Expect(migrateGrafanaPlugin(store, src, dest, []byte("customised"), true)).To(Succeed())
+				b, err := os.ReadFile(filepath.Join(dest, "grafana/custom-metrics/config.yaml"))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(string(b)).To(Equal("customised"))
 			})
 		})
 	})
 
 	Context("migrateAutoUpdatePlugin", func() {
 		It("skips migration as AutoUpdate plugin not found", func() {
-			cfg := &fakeConfig{pluginErr: &config.PluginKeyNotFoundError{Key: "autoupdate.kubebuilder.io/v1-alpha"}}
+			cfg := &fakeConfig{pluginErr: &config.PluginKeyNotFoundError{Key: autoupdatePluginKey}}
 			store := &fakeStore{cfg: cfg}
 			Expect(migrateAutoUpdatePlugin(store)).To(Succeed())
 		})
@@ -920,26 +1074,16 @@ var _ = Describe("generate: migrate-plugins", func() {
 		It("returns error if failed to decode Auto Update plugin", func() {
 			cfg := &fakeConfig{
 				pluginErr: fmt.Errorf("decoding error"),
-				plugins:   map[string]any{"autoupdate.kubebuilder.io/v1-alpha": true},
+				plugins:   map[string]any{autoupdatePluginKey: true},
 			}
 			store := &fakeStore{cfg: cfg}
 			Expect(migrateAutoUpdatePlugin(store)).NotTo(Succeed())
 		})
 
-		It("migrates Auto Update plugin successfully without UseGHModels", func() {
+		It("migrates Auto Update plugin successfully", func() {
 			cfg := &fakeConfig{
 				plugins: map[string]any{
-					"autoupdate.kubebuilder.io/v1-alpha": autoupdatev1alpha.PluginConfig{UseGHModels: false},
-				},
-			}
-			store := &fakeStore{cfg: cfg}
-			Expect(migrateAutoUpdatePlugin(store)).To(Succeed())
-		})
-
-		It("migrates Auto Update plugin successfully with UseGHModels enabled", func() {
-			cfg := &fakeConfig{
-				plugins: map[string]any{
-					"autoupdate.kubebuilder.io/v1-alpha": autoupdatev1alpha.PluginConfig{UseGHModels: true},
+					autoupdatePluginKey: autoupdatev1alpha.PluginConfig{},
 				},
 			}
 			store := &fakeStore{cfg: cfg}
@@ -949,7 +1093,7 @@ var _ = Describe("generate: migrate-plugins", func() {
 
 	Context("migrateDeployImagePlugin", func() {
 		It("returns error if failed to decode Deploy Image plugin", func() {
-			cfg := &fakeConfig{pluginErr: &config.PluginKeyNotFoundError{Key: "deploy-image.kubebuilder.io/v1-alpha"}}
+			cfg := &fakeConfig{pluginErr: &config.PluginKeyNotFoundError{Key: deployImagePluginKey}}
 			store := &fakeStore{cfg: cfg}
 			Expect(migrateDeployImagePlugin(store)).To(Succeed())
 		})
@@ -957,26 +1101,26 @@ var _ = Describe("generate: migrate-plugins", func() {
 		It("returns error if decoding Deploy Image plugin config fails", func() {
 			cfg := &fakeConfig{
 				pluginErr: fmt.Errorf("decoding error"),
-				plugins:   map[string]any{"deploy-image.kubebuilder.io/v1-alpha": true},
+				plugins:   map[string]any{deployImagePluginKey: true},
 			}
 			store := &fakeStore{cfg: cfg}
 			Expect(migrateDeployImagePlugin(store)).NotTo(Succeed())
 		})
 
 		It("migrates Deploy Image plugin successfully", func() {
-			cfg := &fakeConfig{plugins: map[string]any{"deploy-image.kubebuilder.io/v1-alpha": true}}
+			cfg := &fakeConfig{plugins: map[string]any{deployImagePluginKey: true}}
 			store := &fakeStore{cfg: cfg}
 
 			// Mock resources for the plugin
 			resources := []deployimagev1alpha1.ResourceData{
 				{
-					Group:   "example.com",
+					Group:   exampleDomain,
 					Version: "v1",
-					Kind:    "Example",
+					Kind:    exampleKind,
 				},
 			}
 
-			cfg.pluginChain = []string{"deploy-image.kubebuilder.io/v1-alpha"}
+			cfg.pluginChain = []string{deployImagePluginKey}
 			store.cfg = cfg
 
 			// Use the mocked resources

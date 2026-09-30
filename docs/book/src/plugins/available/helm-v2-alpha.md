@@ -1,84 +1,85 @@
 # Helm Plugin `(helm/v2-alpha)`
 
-The Helm plugin **v2-alpha** provides a way to package your project as a Helm chart, enabling distribution in Helm’s native format.
-Instead of using static templates, this plugin dynamically generates Helm charts from your project’s **kustomize output** (via `make build-installer`).
-It keeps your custom settings such as environment variables, labels, annotations, and security contexts.
+The `helm/v2-alpha` plugin generates Helm charts from your project’s kustomize output, letting you distribute your operator as either a bundle or a Helm chart.
 
-This lets you deliver your Kubebuilder project in two ways:
-- As a **bundle** (`dist/install.yaml`) generated with kustomize
-- As a **Helm chart** that matches the same output
+The plugin dynamically builds charts from `make build-installer` output and preserves your customizations like environment variables, labels, annotations, and security contexts.
 
-## Why Helm?
+## Why use Helm
 
-By default, you can create a bundle of manifests with:
+By default, Kubebuilder creates a bundle of manifests:
 
-```shell
+```bash
 make build-installer IMG=<registry>/<project-name:tag>
 ```
 
-Users can install it directly:
+Users install it with:
 
-```shell
+```bash
 kubectl apply -f https://raw.githubusercontent.com/<org>/project-v4/<tag-or-branch>/dist/install.yaml
 ```
-But many people prefer Helm for packaging, upgrades, and distribution.
-The **helm/v2-alpha** plugin converts the bundle (`dist/install.yaml`) into a Helm chart that mirrors your project.
 
-## Key Features
+Many users prefer Helm for packaging and upgrades. This plugin converts `dist/install.yaml` into a Helm chart that mirrors your project.
 
-- **Dynamic Generation**: Charts are built from real kustomize output, not boilerplate.
-- **Preserves Customizations**: Keeps env vars, labels, annotations, and patches.
-- **Structured Output**: Templates follow your `config/` directory layout.
-- **Smart Values**: `values.yaml` includes only actual configurable parameters.
-- **File Preservation**: `Chart.yaml` is never overwritten. Without `--force`, `values.yaml`, `NOTES.txt`, `_helpers.tpl`, `.helmignore` and `.github/workflows/test-chart.yml` are preserved.
-- **Handles Custom Resources**: Resources not matching standard layout (custom Services, ConfigMaps, etc.) are placed in `templates/extras/` with proper templating.
+## Features
 
-## When to Use It
-
-Use the **helm/v2-alpha** plugin if:
-- You want Helm charts that stay true to your kustomize setup
-- You need charts that update with your project automatically
-- You want a clean template layout similar to `config/`
-- You want to distribute your solution using either this format
+- Generates charts from kustomize output, not boilerplate
+- Preserves environment variables, labels, annotations, and patches
+- Organizes templates to match your `config/` directory layout
+- Includes only configurable parameters in `values.yaml`
+- Never overwrites `Chart.yaml`; preserves `values.yaml`, `NOTES.txt`, `_helpers.tpl`, `.helmignore`, `test-chart.yml`, `network-policy/allow-metrics-traffic.yaml`, and `network-policy/allow-webhook-traffic.yaml` unless you use `--force`
+- Adds default `ServiceMonitor` and `NetworkPolicy` templates when kustomize output does not provide them
+- Places custom resources in `templates/extras/` with Helm templating
 
 ## Usage
 
-### Basic Workflow
+### Basic workflow
 
-```shell
-# Create a new project
+Create a project and build the installer bundle:
+
+```bash
 kubebuilder init
-
-# Build the installer bundle
 make build-installer IMG=<registry>/<project:tag>
+```
 
-# Create Helm chart from kustomize output
+Generate the Helm chart from kustomize output:
+
+```bash
 kubebuilder edit --plugins=helm/v2-alpha
+```
 
-# Regenerate preserved files (Chart.yaml never overwritten)
+To regenerate preserved files (except `Chart.yaml`), use `--force`:
+
+```bash
 kubebuilder edit --plugins=helm/v2-alpha --force
 ```
 
-### Advanced Options
+### Advanced options
 
-```shell
-# Use a custom manifests file
+Use a custom manifests file:
+
+```bash
 kubebuilder edit --plugins=helm/v2-alpha --manifests=manifests/custom-install.yaml
+```
 
-# Write chart to a custom output directory
+Write chart to a custom output directory:
+
+```bash
 kubebuilder edit --plugins=helm/v2-alpha --output-dir=charts
+```
 
-# Combine manifests and output
+Combine custom manifests and output directory:
+
+```bash
 kubebuilder edit --plugins=helm/v2-alpha \
   --manifests=manifests/install.yaml \
   --output-dir=helm-charts
 ```
 
-## Chart Structure
+## Chart structure
 
-The plugin creates a chart layout that matches your `config/`:
+The plugin generates a chart layout that mirrors your `config/` directory:
 
-```shell
+```text
 <output-dir>/chart/
 ├── Chart.yaml
 ├── values.yaml
@@ -95,12 +96,6 @@ The plugin creates a chart layout that matches your `config/`:
     │   ├── metrics-auth-role.yaml
     │   ├── metrics-auth-rolebinding.yaml
     │   ├── metrics-reader.yaml
-    │   ├── memcached-admin-role.yaml
-    │   ├── memcached-editor-role.yaml
-    │   ├── memcached-viewer-role.yaml
-    │   ├── busybox-admin-role.yaml
-    │   ├── busybox-editor-role.yaml
-    │   ├── busybox-viewer-role.yaml
     │   └── ...
     ├── crd/                     # Individual CRD files (examples)
     │   ├── busyboxes.example.com.testproject.org.yaml
@@ -118,236 +113,371 @@ The plugin creates a chart layout that matches your `config/`:
     │   └── webhook-service.yaml
     ├── monitoring/
     │   └── servicemonitor.yaml
+    ├── network-policy/
+    │   ├── allow-metrics-traffic.yaml
+    │   └── allow-webhook-traffic.yaml  # If webhooks are configured
     └── extras/                  # Custom resources (if any)
         ├── my-service.yaml
         └── my-config.yaml
 ```
 
 <aside class="note" role="note">
-<p class="note-title">Chart Structure</p>
+<p class="note-title">What is templates/extras/</p>
 
-The chart structure mirrors your project's resources:
+Standard resources (RBAC, manager, webhooks, CRDs) use dedicated template directories. Other resources go in `templates/extras/`.
 
-- Standard resources (RBAC, manager, webhooks, CRDs) go into dedicated template directories
-- Other resources (Services, ConfigMaps, Secrets) go into `templates/extras/` with Helm templating
-- **Custom Resource instances** from `config/samples/` are **not included in the chart**
-
-By default, `make build-installer` does not include samples in `dist/install.yaml`. If you manually add CR instances to your kustomize output, the Helm plugin will ignore them.
+Custom Resource instances from `config/samples/` are not included. The plugin ignores CR instances even if you add them to kustomize output.
 
 </aside>
 
 <aside class="note" role="note">
-<p class="note-title"> Why CRDs are added under templates? </p>
+<p class="note-title">Why CRDs are in templates/</p>
 
 Although [Helm best practices](https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#method-1-let-helm-do-it-for-you) recommend placing CRDs under a top-level `crds/` directory, the Kubebuilder Helm plugin intentionally places them under `templates/crd`.
 
-The rationale is tied to how Helm itself handles CRDs.
-By default, Helm will install CRDs once during the initial release,
-but it will **ignore CRD changes** on subsequent upgrades.
+The rationale is tied to how Helm itself handles CRDs. By default, Helm will install CRDs once during the initial release, but it will **ignore CRD changes** on subsequent upgrades.
 
-This can lead to surprising behavior where chart upgrades silently
-skip CRD updates, leaving clusters out of sync.
+This can lead to surprising behavior where chart upgrades silently skip CRD updates, leaving clusters out of sync.
 
-To avoid endorsing this behavior, the Kubebuilder plugin follows the approach of packaging
-CRDs inside `templates/`. In this mode, Helm treats CRDs like
-any other resource, ensuring they are applied and upgraded as expected.
-While this prevents mixing CRDs and CRs of the same type in a single chart (since Helm cannot wait between creation steps), it ensures predictable and explicit lifecycle management of CRDs.
+To avoid endorsing this behavior, the Kubebuilder plugin follows the approach of packaging CRDs inside `templates/`. In this mode, Helm treats CRDs like any other resource, ensuring they are applied and upgraded as expected. While this prevents mixing CRDs and CRs of the same type in a single chart (since Helm cannot wait between creation steps), it ensures predictable and explicit lifecycle management of CRDs.
 
 In short:
-- **Helm `crds/` directory** → one-time install only, no upgrades.
-- **Kubebuilder `templates/crd`** → CRDs managed like other manifests, upgrades included.
+- **Helm `crds/` directory**: one-time install only, no upgrades.
+- **Kubebuilder `templates/crd`**: CRDs managed like other manifests, upgrades included.
 
-This design choice prioritizes correctness and maintainability over Helm's default convention,
-while leaving room for future improvements (such as scaffolding separate charts for APIs and controllers).
+This design choice prioritizes correctness and maintainability over Helm's default convention, while leaving room for future improvements (such as scaffolding separate charts for APIs and controllers).
+
 </aside>
 
-## Post-Install Notes
-
-The plugin generates a `NOTES.txt` template that displays helpful information after `helm install` or `helm upgrade`:
-
-- Installation confirmation with release name and namespace
-- Commands to verify the deployment (kubectl get pods, CRDs)
-- How to get more information using helm commands
-
-The `NOTES.txt` file is preserved on subsequent runs (unless `--force` is used), allowing you to customize the post-install message for your users.
-
-## Values Configuration
+## Values configuration
 
 The generated `values.yaml` provides configuration options extracted from your actual deployment.
 Namespace creation is not managed by the chart; use Helm's `--namespace` and `--create-namespace` flags when installing.
 
-**Example**
+### How values are formatted
+
+Values are uncommented when:
+- Extracted from kustomize source manifests
+- Standard Helm fields (replicas, image, resource names)
+
+Values stay commented when:
+- Optional Kubernetes features not in use (imagePullSecrets, priorityClassName)
+- Advanced configuration not needed for basic usage (topology spread, pod disruption budget)
+- User customization fields (name overrides, custom labels)
+
+**Example:**
 
 ```yaml
-## String to partially override chart.fullname template (will maintain the release name)
-##
-# nameOverride: ""
+{{#include ../../getting-started/testdata/project/dist/chart/values.yaml}}
+```
 
-## String to fully override chart.fullname template
-##
-# fullnameOverride: ""
+### Installation
 
-## Configure the controller manager deployment
-##
-manager:
-  replicas: 1
+The plugin adds Helm targets to your `Makefile`:
 
-  image:
-    repository: controller
-    tag: latest
-    pullPolicy: IfNotPresent
+```bash
+make helm-deploy IMG=<registry>/<project:tag>
+make helm-status
+```
 
-  ## Arguments
-  ##
-  args:
-    - --leader-elect
+Install manually with all features enabled:
 
-  ## Environment variables
-  ##
-  env:
-    - name: BUSYBOX_IMAGE
-      value: busybox:1.36.1
-    - name: MEMCACHED_IMAGE
-      value: memcached:1.6.26-alpine3.19
+```bash
+$ helm install my-release ./dist/chart --namespace my-project-system --create-namespace
+```
 
-  ## Image pull secrets
-  ##
-  imagePullSecrets: []
-  # Example:
-  # imagePullSecrets:
-  #   - name: myregistrykey
+For charts without conversion webhooks, disable the manager and all optional
+components by setting all of these values to `false`:
 
-  ## Pod-level security settings
-  ##
-  podSecurityContext:
-    runAsNonRoot: true
-    seccompProfile:
-        type: RuntimeDefault
+```bash
+$ helm install my-release ./dist/chart \
+  --set manager.enabled=false \
+  --set metrics.enabled=false \
+  --set webhook.enabled=false \
+  --set prometheus.enabled=false \
+  --set certManager.enabled=false \
+  --set networkPolicy.enabled=false
+```
 
-  ## Container-level security settings
-  ##
-  securityContext:
-    allowPrivilegeEscalation: false
-    capabilities:
-        drop:
-            - ALL
-    readOnlyRootFilesystem: true
+For charts without conversion webhooks, install without webhooks:
 
-  ## Resource limits and requests
-  ##
-  resources:
-    limits:
-        cpu: 500m
-        memory: 128Mi
-    requests:
-        cpu: 10m
-        memory: 64Mi
+```bash
+$ helm install my-release ./dist/chart --set webhook.enabled=false --set certManager.enabled=false
+```
 
-  ## Manager pod's affinity
-  ##
-  affinity: {}
-  # Example:
-  # affinity:
-  #   nodeAffinity:
-  #     requiredDuringSchedulingIgnoredDuringExecution:
-  #       nodeSelectorTerms:
-  #         - matchExpressions:
-  #           - key: kubernetes.io/arch
-  #             operator: In
-  #             values:
-  #               - amd64
-  #               - arm64
+`webhook.enabled=false` skips the webhook Service, the webhook configurations, the webhook NetworkPolicy, and the `webhook-server` container port. It also sets `--webhook-port=-1` to disable the webhook server. This works like `metrics.enabled=false`, which passes `--metrics-bind-address=0`.
 
-  ## Manager pod's node selector
-  ##
-  nodeSelector: {}
-  # Example:
-  # nodeSelector:
-  #   kubernetes.io/os: linux
-  #   disktype: ssd
+<aside class="note warning" role="note">
+<p class="note-title">Requires controller-runtime v0.25.0 or later</p>
 
-  ## Manager pod's tolerations
-  ##
-  tolerations: []
-  # Example:
-  # tolerations:
-  #   - key: "node.kubernetes.io/unreachable"
-  #     operator: "Exists"
-  #     effect: "NoExecute"
-  #     tolerationSeconds: 6000
+Older controller-runtime releases treat `--webhook-port=-1` as the default `9443`. The manager then tries to start the webhook server without a certificate and fails. See [Disabling the webhook server](../../reference/webhook-overview.md#disabling-the-webhook-server).
 
-## Helper RBAC roles for managing custom resources
-##
-rbacHelpers:
-  # Install convenience admin/editor/viewer roles for CRDs
-  enable: false
+</aside>
 
-## Custom Resource Definitions
-##
-crd:
-  # Install CRDs with the chart
-  enable: true
-  # Keep CRDs when uninstalling
-  keep: true
+Charts with CR version conversion reject `webhook.enabled=false`. The API server needs the webhook Service to convert custom resources.
 
-## Controller metrics endpoint.
-## Enable to expose /metrics endpoint with RBAC protection.
-##
-metrics:
-  enable: true
-  # Metrics server port
-  port: 8443
+Install with NetworkPolicy resources:
 
-## Cert-manager integration for TLS certificates.
-## Required for webhook certificates and metrics endpoint certificates.
-##
-certManager:
-  enable: true
-
-## Webhook server configuration
-##
-webhook:
-  enable: true
-  # Webhook server port
-  port: 9443
-
-## Prometheus ServiceMonitor for metrics scraping.
-## Requires prometheus-operator to be installed in the cluster.
-##
-prometheus:
-  enable: false
+```bash
+$ helm install my-release ./dist/chart --set networkPolicy.enabled=true
 ```
 
 ### Extra volumes
 
-The chart supports additional volumes and volume mounts for the manager (e.g. secrets, config files), alongside the built-in webhook and metrics cert volumes.
+Add volumes and volume mounts to the manager deployment beyond webhook and metrics certificates.
 
-- **Config volumes**: Volumes in the manager deployment (e.g. `config/manager/manager.yaml` or kustomize patches) are written into the chart template. Re-running `kubebuilder edit --plugins=helm/v2-alpha` updates the template from config; `values.yaml` is not overwritten.
-- **Values**: When the manager deployment has extra volumes (other than webhook/metrics), `values.yaml` gets `manager.extraVolumes` and `manager.extraVolumeMounts`. Use them to add more entries; the template appends them after the config volumes. Same structure as in a Pod spec; mount names must match volume names.
+Volumes in your kustomize configuration (`config/manager/manager.yaml` or patches) are written to the chart template. When the manager has extra volumes, `values.yaml` includes `manager.extraVolumes` and `manager.extraVolumeMounts` fields. Use these to add more volumes at install time.
 
-Webhook and metrics (`webhook-certs`, `metrics-certs`) are not in `extraVolumes`. They are conditional on `certManager.enable` and `metrics.enable`, like the rest of the chart.
+Webhook and metrics certificates (`webhook-certs`, `metrics-certs`) are managed separately and controlled by `certManager.enabled` and (for metrics TLS) `metrics.enabled` + `metrics.secure`.
 
-### Installation
+### Metrics configuration
 
-The first time you run the plugin, it adds convenient Helm deployment targets to your `Makefile`:
+#### `metrics.port`
 
-```shell
-make helm-deploy IMG=<registry>/<project:tag>  # Deploy/upgrade the chart
-make helm-status                                # Check release status
-make helm-history                               # View release history
-make helm-rollback                              # Rollback to previous version
-make helm-uninstall                             # Remove the release
+Set `metrics.port` to change the port used by the metrics endpoint. The chart applies the same value to the manager `--metrics-bind-address` argument, the metrics Service port and targetPort, and the metrics NetworkPolicy.
+
+For example, install the chart with the metrics endpoint on port `8444`:
+
+```bash
+helm install my-operator ./dist/chart --set metrics.port=8444
 ```
 
-You can also install manually using Helm commands:
+The default is `8443`, detected from your project configuration.
 
-```shell
-helm install my-release ./dist/chart \
-  --namespace my-project-system \
-  --create-namespace
+#### `metrics.secure`
+
+Control transport security and authentication for the metrics endpoint (default: `true`).
+
+When `true`:
+- Uses HTTPS with TLS certificates (when `certManager.enabled=true`)
+- Creates `metrics-auth-role` ClusterRole for authentication
+- ServiceMonitor uses HTTPS
+
+When `false`:
+- Uses HTTP without authentication
+- No TLS certificates
+- ServiceMonitor uses HTTP
+
+<aside class="note" role="note">
+<p class="note-title">Metrics roles are always cluster-scoped</p>
+
+The `metrics-auth-role` and `metrics-reader` are always ClusterRoles, even when `rbac.namespaced=true`. Metrics authentication uses cluster-scoped APIs for authenticating scrapers like Prometheus.
+
+</aside>
+
+### Webhook port configuration
+
+Set `webhook.port` to change the manager argument, container port, Service target port, and NetworkPolicy. The Service's exposed port remains unchanged (`443` in the default manifests).
+
+For example, install the chart with the webhook server on port `9444`:
+
+```bash
+helm install my-operator ./dist/chart --set webhook.port=9444
 ```
 
-The Makefile targets use sensible defaults extracted from your project configuration (namespace from manifests, release name from project name, chart directory from `--output-dir` flag).
+The default is `9443`, detected from your project configuration. To disable the webhook server, set `webhook.enabled=false` instead of changing the port.
+
+### Health probe port configuration
+
+Set `manager.healthProbe.port` to change the port where the manager serves its health probes. The liveness (`/healthz`) and readiness (`/readyz`) endpoints bind to this port. The chart applies the same value to the `--health-probe-bind-address` argument, the `health` container port, and the `httpGet` port of both probes.
+
+For example, install the chart with the health probes on port `8082`:
+
+```bash
+helm install my-operator ./dist/chart --set manager.healthProbe.port=8082
+```
+
+The default is `8081`, detected from your project configuration.
+
+### Passing args for the manager
+
+Use `manager.args` in `values.yaml` to pass extra flags to the manager container that the chart does not expose as dedicated values. The chart renders each entry through Helm's `tpl` function, evaluated against the chart's root context, so an arg can reference other values, release information, or chart template functions instead of only a static string.
+
+For example, set the leader election namespace from the release namespace and add a plain flag:
+
+```yaml
+manager:
+  args:
+  - --leader-election-namespace={{ .Release.Namespace }}
+  - --leader-elect
+```
+
+Helm evaluates `{{ .Release.Namespace }}` at render time, so the manager container receives `--leader-election-namespace=<release-namespace>`. The `--leader-elect` flag has no template syntax, so it renders unchanged.
+
+<aside class="note" role="note">
+<p class="note-title">Do not set the metrics, webhook, or health probe flags in manager.args</p>
+
+The chart already exposes `--metrics-bind-address`, `--webhook-port`, and `--health-probe-bind-address` as `metrics.port`, `webhook.port`, and `manager.healthProbe.port`. Set those values instead of adding the flags to `manager.args`. The plugin removes these flags from the extracted args when it generates the chart, so adding one back through `manager.args`, templated or not, creates a duplicate flag alongside the value-driven one. The Service, NetworkPolicy, and probes keep using the configured port, so traffic and probes then target the wrong port.
+
+</aside>
+
+### NetworkPolicy configuration
+
+Set `networkPolicy.enabled: true` to install NetworkPolicy resources for the manager pod.
+
+When the kustomize output includes `NetworkPolicy` resources, the plugin converts and enables them. Otherwise, it generates a default metrics policy and, when it detects an admission or CRD conversion webhook, a default webhook policy.
+
+The plugin preserves default NetworkPolicy templates unless you pass `--force`. Policies from the kustomize output always regenerate, so edit them in `config/network-policy/`.
+
+The generated metrics policy is rendered only when both `networkPolicy.enabled` and `metrics.enabled` are `true`. The generated webhook policy is rendered only when both `networkPolicy.enabled` and `webhook.enabled` are `true`.
+
+The metrics policy allows ingress only from pods in namespaces labeled `metrics: enabled`. Label each namespace whose pods should scrape metrics:
+
+```bash
+$ kubectl label namespace <namespace> metrics=enabled
+```
+
+The default webhook policy allows ingress from all sources to the manager pod's webhook port. The API server reaches this port through the webhook Service for admission and CRD conversion webhooks. To restrict admission requests by namespace, set `namespaceSelector` on the `MutatingWebhookConfiguration` or `ValidatingWebhookConfiguration`. This setting controls which requests invoke an admission webhook; it does not restrict NetworkPolicy traffic.
+
+### Custom labels and annotations
+
+Add custom labels and annotations using `manager.labels`, `manager.annotations`, `manager.pod.labels`, and `manager.pod.annotations`. Duplicate keys from kustomize are filtered automatically.
+
+The ServiceAccount and ServiceMonitor resources support the same pattern through `serviceAccount.labels`, `serviceAccount.annotations`, `prometheus.labels`, and `prometheus.annotations`. For example, to match a Prometheus Operator `serviceMonitorSelector`:
+
+```yaml
+prometheus:
+  enabled: true
+  labels:
+    release: prometheus
+  annotations:
+    example.com/owner: sre
+```
+
+### ServiceAccount configuration
+
+Set `serviceAccount.enabled: true` (default) to create a ServiceAccount. Set `serviceAccount.enabled: false` to use an existing one:
+
+```yaml
+serviceAccount:
+  enabled: false
+  name: my-existing-sa
+```
+
+The chart ships with the toggle enabled:
+
+```yaml
+serviceAccount:
+  enabled: true
+```
+
+Helm merges this default into any values file that omits the section, so omitting it keeps creating the account.
+
+When `serviceAccount.enabled: false`, `serviceAccount.name` is required and the chart fails to render without it. Set `name: default` explicitly to use the namespace default ServiceAccount.
+
+The resolved name is used consistently in the Deployment and in all RBAC bindings, for both cluster-scoped and namespaced RBAC modes:
+
+| `serviceAccount.enabled` | `serviceAccount.name` | ServiceAccount created | Name used (Deployment + RBAC bindings) |
+|--------------------------|-----------------------|------------------------|----------------------------------------|
+| `true` (default) | any | Yes | Generated (`<fullname>-controller-manager`, name is ignored) |
+| `false` | set | No | The provided name |
+| `false` | `default` | No | Namespace default ServiceAccount |
+| `false` | unset | No | Render fails with a clear error |
+
+The generated name is built from the chart fullname, typically `<release>-<chart>`, plus the `-controller-manager` suffix, truncated to the 63-character Kubernetes limit. It respects `nameOverride` and `fullnameOverride`.
+
+<aside class="note warning" role="note">
+<p class="note-title">Why an explicit name is required</p>
+
+Falling back to the namespace default ServiceAccount silently would bind the operator RBAC permissions to a shared identity. Requiring `serviceAccount.name` makes that choice explicit and catches misconfiguration at render time.
+
+</aside>
+
+Add annotations for cloud provider integrations:
+
+```yaml
+serviceAccount:
+  enabled: true
+  annotations:
+    iam.gke.io/gcp-service-account: my-operator@project.iam.gserviceaccount.com
+```
+
+External ServiceAccount names are used as-is and ignore `nameOverride` or `fullnameOverride`.
+
+### RBAC configuration
+
+#### `rbac.namespaced`
+
+Set the scope of RBAC permissions:
+
+- `false` (default): ClusterRole and ClusterRoleBinding for all namespaces
+- `true`: Role and RoleBinding for release namespace only
+
+<aside class="note" role="note">
+<p class="note-title">What rbac.namespaced controls</p>
+
+This controls RBAC permissions only. To control watch scope, use `WATCH_NAMESPACE` ([Manager Scope](../../reference/manager-scope.md)). The `metrics-auth-role` is always a ClusterRole and `leader-election-role` is always a Role.
+
+</aside>
+
+#### `rbac.roleNamespaces`
+
+When your kustomize output includes Roles and RoleBindings for specific namespaces (other than the manager namespace), the plugin automatically detects them and creates `roleNamespaces` entries.
+
+Add namespace-specific RBAC markers to your controller:
+
+```go
+// +kubebuilder:rbac:groups=apps,namespace=infrastructure,resources=deployments,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",namespace=users,resources=secrets,verbs=get;list;watch
+```
+
+Run `make manifests` to generate the RBAC manifests, then run the plugin. The generated `values.yaml` includes:
+
+```yaml
+rbac:
+  namespaced: false
+
+  ## Namespace configuration for Roles deployed to namespaces different from the manager namespace
+  ## Keys are resource name suffixes (without project prefix)
+  ##
+  roleNamespaces:
+    # RBAC resource manager-role-infrastructure deploys to namespace infrastructure
+    "manager-role-infrastructure": "infrastructure"
+    # RBAC resource manager-rolebinding-infrastructure deploys to namespace infrastructure
+    "manager-rolebinding-infrastructure": "infrastructure"
+    # RBAC resource manager-role-users deploys to namespace users
+    "manager-role-users": "users"
+    # RBAC resource manager-rolebinding-users deploys to namespace users
+    "manager-rolebinding-users": "users"
+
+  helpers:
+    enabled: false
+```
+
+Override namespaces at deployment using a values file:
+
+```yaml
+# custom-values.yaml
+rbac:
+  roleNamespaces:
+    "manager-role-infrastructure": "prod-infra"
+    "manager-rolebinding-infrastructure": "prod-infra"
+    "manager-role-users": "prod-users"
+    "manager-rolebinding-users": "prod-users"
+```
+
+Install with custom namespaces:
+
+```bash
+helm install my-operator ./dist/chart -f custom-values.yaml
+```
+
+Or use `--set`:
+
+```bash
+helm install my-operator ./dist/chart \
+  --set 'rbac.roleNamespaces[manager-role-infrastructure]=prod-infra' \
+  --set 'rbac.roleNamespaces[manager-role-users]=prod-users'
+```
+
+<aside class="note" role="note">
+<p class="note-title">Helper roles and optional values</p>
+
+Set `rbac.helpers.enabled: true` to create admin, editor, and viewer roles for Custom Resources.
+
+Optional fields in `values.yaml` use Helm conditionals. Comment them out to exclude them from deployed manifests.
+
+</aside>
 
 ## Flags
 
@@ -355,7 +485,7 @@ The Makefile targets use sensible defaults extracted from your project configura
 |---------------------|-----------------------------------------------------------------------------|
 | **--manifests**     | Path to YAML file containing Kubernetes manifests (default: `dist/install.yaml`) |
 | **--output-dir** string | Output directory for chart (default: `dist`)                                |
-| **--force**         | Regenerates preserved files except `Chart.yaml` (`values.yaml`, `NOTES.txt`, `_helpers.tpl`, `.helmignore`, `test-chart.yml`) |
+| **--force**         | Regenerates preserved files except `Chart.yaml` (`values.yaml`, `NOTES.txt`, `_helpers.tpl`, `.helmignore`, `test-chart.yml`, `network-policy/allow-metrics-traffic.yaml`, `network-policy/allow-webhook-traffic.yaml`) |
 
 <aside class="note" role="note">
 <p class="note-title"> Examples </p>

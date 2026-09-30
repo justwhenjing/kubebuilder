@@ -17,6 +17,8 @@ limitations under the License.
 package internal
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	log "log/slog"
@@ -25,6 +27,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/spf13/afero"
 	"golang.org/x/mod/semver"
@@ -130,7 +133,15 @@ func (opts *Update) downloadKubebuilderBinary() (string, error) {
 	}()
 
 	// Download the binary from GitHub releases
-	response, err := http.Get(url)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to build download request: %w", err)
+	}
+
+	response, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to download the binary: %w", err)
 	}
@@ -433,15 +444,15 @@ func (opts *Update) Validate() error {
 	return nil
 }
 
-// Load the PROJECT configuration file to get the current CLI version
+// loadConfigFile loads the PROJECT configuration file to get the current CLI version.
 func (opts *Update) loadConfigFile() (store.Store, error) {
 	projectConfigFile := yaml.New(machinery.Filesystem{FS: afero.NewOsFs()})
 	// TODO: assess if DefaultPath could be renamed to a more self-descriptive name
 	if err := projectConfigFile.LoadFrom(yaml.DefaultPath); err != nil {
-		if _, statErr := os.Stat(yaml.DefaultPath); os.IsNotExist(statErr) {
+		if errors.Is(err, os.ErrNotExist) {
 			return projectConfigFile, fmt.Errorf("no PROJECT file found. Make sure you're in the project root directory")
 		}
-		return projectConfigFile, fmt.Errorf("fail to load the PROJECT file: %w", err)
+		return projectConfigFile, fmt.Errorf("failed to load the PROJECT file: %w", err)
 	}
 	return projectConfigFile, nil
 }
@@ -475,7 +486,15 @@ func (opts *Update) validateBinaryAvailability() error {
 	opts.BinaryURL = fmt.Sprintf("https://github.com/kubernetes-sigs/kubebuilder/releases/download/%s/kubebuilder_%s_%s",
 		opts.CliVersion, runtime.GOOS, runtime.GOARCH)
 
-	resp, err := http.Head(opts.BinaryURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, opts.BinaryURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to build binary availability request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to check binary availability: %w", err)
 	}

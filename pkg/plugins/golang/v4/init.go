@@ -17,6 +17,7 @@ limitations under the License.
 package v4
 
 import (
+	"errors"
 	"fmt"
 	log "log/slog"
 	"os"
@@ -48,8 +49,9 @@ type initSubcommand struct {
 	commandName string
 
 	// boilerplate options
-	license string
-	owner   string
+	license     string
+	owner       string
+	licenseFile string
 
 	// go config options
 	repo string
@@ -80,10 +82,11 @@ Configuration flags:
   --license: License to use (apache2 or none, default: apache2)
 
 Plugin flags:
-  --plugins: Comma-separated list of plugins to use (default: go/v4)
-             Plugins scaffold files during init and are saved to the PROJECT layout
-             Future operations (i.e. create api, create webhook) call all plugins in the chain
-             Run 'kubebuilder init --plugins --help' to see available plugins
+  --plugins: Comma-separated list of plugins to use (e.g., go/v4,<PLUGIN_KEY>).
+             If unset, Kubebuilder uses the default go/v4 scaffold.
+             Plugins used during init are saved to the PROJECT layout.
+             Future operations, such as create api and create webhook, use that plugin chain.
+             Run 'kubebuilder init --plugins --help' to see available plugins.
 
 Layout flags:
   --multigroup: Enable multigroup layout to organize APIs by group
@@ -108,35 +111,48 @@ Note: Layout settings can be changed later with 'kubebuilder edit'.
 
   # Initialize with optional plugins
   %[1]s init --plugins go/v4,autoupdate/v1-alpha --domain example.org
-  %[1]s init --plugins go/v4,helm/v2-alpha --domain example.org
+  %[1]s init --plugins go/v4,<PLUGIN_KEY> --domain example.org
 
   # Initialize with custom settings
   %[1]s init --domain example.org --owner "Your Name" --license apache2
 
   # Initialize with all options combined
   %[1]s init --plugins go/v4,autoupdate/v1-alpha --domain example.org --multigroup --namespaced
+
+  # Initialize with specific project version
+  %[1]s init --plugins go/v4 --project-version 3
+
+  # Initialize with custom license header from file
+  %[1]s init --plugins go/v4 --domain example.org --license-file ./my-header.txt
+
+  # Initialize with built-in license (apache2, none)
+  %[1]s init --plugins go/v4 --domain example.org --license apache2
 `, cliMeta.CommandName)
 }
 
 func (p *initSubcommand) BindFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&p.skipGoVersionCheck, "skip-go-version-check",
-		false, "skip Go version check")
+		false, "If set, skip Go version check")
 
 	// dependency args
-	fs.BoolVar(&p.fetchDeps, "fetch-deps", true, "download dependencies after scaffolding")
+	fs.BoolVar(&p.fetchDeps, "fetch-deps", true,
+		"Download dependencies after scaffolding (enabled by default; use --fetch-deps=false to disable)")
 
 	// boilerplate args
 	fs.StringVar(&p.license, "license", "apache2",
-		"license header to use (apache2 or none)")
-	fs.StringVar(&p.owner, "owner", "", "copyright owner for license headers")
+		"License header to use for boilerplate (e.g., apache2, none). Defaults to apache2 if unset "+
+			"(see: https://book.kubebuilder.io/reference/license-header)")
+	fs.StringVar(&p.owner, "owner", "", "Owner name for copyright license headers")
+	fs.StringVar(&p.licenseFile, "license-file", "",
+		"Path to custom license file; content copied to hack/boilerplate.go.txt (overrides --license)")
 
 	// project args
 	fs.StringVar(&p.repo, "repo", "", "Go module name (e.g., github.com/user/repo); "+
 		"auto-detected from current directory if not provided")
 	fs.BoolVar(&p.multigroup, "multigroup", false,
-		"enable multigroup layout (organize APIs by group)")
+		"If set, enable multigroup layout (organize APIs by group)")
 	fs.BoolVar(&p.namespaced, "namespaced", false,
-		"enable namespace-scoped deployment (default: cluster-scoped)")
+		"If set, enable namespace-scoped deployment (default: cluster-scoped)")
 }
 
 func (p *initSubcommand) InjectConfig(c config.Config) error {
@@ -178,12 +194,39 @@ func (p *initSubcommand) PreScaffold(machinery.Filesystem) error {
 		}
 	}
 
+	// Trim whitespace from license file path
+	p.licenseFile = strings.TrimSpace(p.licenseFile)
+
+	// Validate license file before scaffolding to prevent broken state
+	if p.licenseFile != "" {
+		if _, err := os.Stat(p.licenseFile); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("license file %q does not exist", p.licenseFile)
+			}
+			return fmt.Errorf("failed to access license file %q: %w", p.licenseFile, err)
+		}
+
+		// Check that the license file is a valid Go comment block
+		content, err := os.ReadFile(p.licenseFile)
+		if err != nil {
+			return fmt.Errorf("failed to read license file %q: %w", p.licenseFile, err)
+		}
+
+		// Empty files are allowed, only validate format if file has content
+		if len(content) > 0 {
+			contentStr := strings.TrimSpace(string(content))
+			if !strings.HasPrefix(contentStr, "/*") || !strings.HasSuffix(contentStr, "*/") {
+				return fmt.Errorf("license file %q must be a valid Go comment block (start with /* and end with */)", p.licenseFile)
+			}
+		}
+	}
+
 	// Check if the current directory has no files or directories which does not allow to init the project
 	return checkDir()
 }
 
 func (p *initSubcommand) Scaffold(fs machinery.Filesystem) error {
-	scaffolder := scaffolds.NewInitScaffolder(p.config, p.license, p.owner, p.commandName)
+	scaffolder := scaffolds.NewInitScaffolder(p.config, p.license, p.owner, p.licenseFile, p.commandName)
 	scaffolder.InjectFS(fs)
 	if err := scaffolder.Scaffold(); err != nil {
 		return fmt.Errorf("error scaffolding init plugin: %w", err)
@@ -215,6 +258,18 @@ func (p *initSubcommand) PostScaffold() error {
 	return nil
 }
 
+// describeMode returns a human-readable description of a file mode.
+func describeMode(mode os.FileMode) string {
+	switch {
+	case mode&os.ModeSymlink != 0:
+		return "a symbolic link"
+	case mode.IsDir():
+		return "a directory"
+	default:
+		return "not a regular file"
+	}
+}
+
 // checkDir checks the target directory before scaffolding:
 // 1. Returns error if key kubebuilder files already exist (prevents re-initialization)
 // 2. Warns if directory is not empty (but allows scaffolding to continue)
@@ -231,9 +286,17 @@ func checkDir() error {
 		filepath.Join("cmd", "main.go"), // Controller manager entry point
 	}
 
-	// Check for existing scaffolded files
+	// The link is not followed, so that scaffolding never writes through it.
 	for _, file := range scaffoldedFiles {
-		if _, err := os.Stat(file); err == nil {
+		info, err := os.Lstat(file)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+		case err != nil:
+			return fmt.Errorf("failed to check %q: %w", file, err)
+		case !info.Mode().IsRegular():
+			return fmt.Errorf("cannot scaffold: %q is %s. "+
+				"Please run this command in a new directory or remove it", file, describeMode(info.Mode()))
+		default:
 			return fmt.Errorf("target directory is already initialized. "+
 				"Found existing kubebuilder file %q. "+
 				"Please run this command in a new directory or remove existing scaffolded files", file)

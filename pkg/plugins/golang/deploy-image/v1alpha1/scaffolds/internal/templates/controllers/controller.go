@@ -37,8 +37,6 @@ type Controller struct {
 	machinery.NamespacedMixin
 
 	ControllerRuntimeVersion string
-
-	PackageName string
 }
 
 // SetTemplateDefaults implements machinery.Template
@@ -53,8 +51,6 @@ func (f *Controller) SetTemplateDefaults() error {
 	f.Path = f.Resource.Replacer().Replace(f.Path)
 	log.Info(f.Path)
 
-	f.PackageName = "controller"
-
 	log.Info("creating import for resource", "resource_path", f.Resource.Path)
 	f.TemplateBody = controllerTemplate
 
@@ -67,7 +63,11 @@ func (f *Controller) SetTemplateDefaults() error {
 //nolint:lll
 const controllerTemplate = `{{ .Boilerplate }}
 
-package {{ if and .MultiGroup .Resource.Group }}{{ .Resource.PackageName }}{{ else }}{{ .PackageName }}{{ end }}
+{{if and .MultiGroup .Resource.Group }}
+package {{ .Resource.PackageName }}
+{{else}}
+package controller
+{{end}}
 
 import (
 	"context"
@@ -84,7 +84,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -96,6 +95,8 @@ import (
 )
 
 const {{ lower .Resource.Kind }}Finalizer = "{{ .Resource.Group }}.{{ .Resource.Domain }}/finalizer"
+
+const {{ lower .Resource.Kind }}ContainerName = "{{ lower .Resource.Kind }}"
 
 // Definitions to manage status conditions
 const (
@@ -162,9 +163,9 @@ func (r *{{ .Resource.Kind }}Reconciler) Reconcile(ctx context.Context, req ctrl
 		log.Error(err, "Failed to get {{ lower .Resource.Kind }}")
 		return ctrl.Result{}, err
 	}
-	
+
 	if len({{ lower .Resource.Kind }}.Status.Conditions) == 0 {
-		meta.SetStatusCondition(&{{ lower .Resource.Kind }}.Status.Conditions, metav1.Condition{Type: typeAvailable{{ .Resource.Kind }}, Status: metav1.ConditionUnknown, Reason: "Reconciling", Message: "Starting reconciliation"})
+		meta.SetStatusCondition(&{{ lower .Resource.Kind }}.Status.Conditions, metav1.Condition{Type: typeAvailable{{ .Resource.Kind }}, Status: metav1.ConditionUnknown, Reason: reasonReconciling, Message: "Starting reconciliation"})
 		if err = r.Status().Update(ctx, {{ lower .Resource.Kind }}); err != nil {
 			log.Error(err, "Failed to update {{ .Resource.Kind }} status")
 			return ctrl.Result{}, err
@@ -202,7 +203,7 @@ func (r *{{ .Resource.Kind }}Reconciler) Reconcile(ctx context.Context, req ctrl
 
 			// Let's add here a status "Downgrade" to reflect that this resource began its process to be terminated.
 			meta.SetStatusCondition(&{{ lower .Resource.Kind }}.Status.Conditions, metav1.Condition{Type: typeDegraded{{ .Resource.Kind }},
-				Status: metav1.ConditionUnknown, Reason: "Finalizing",
+				Status: metav1.ConditionUnknown, Reason: reasonFinalizing,
 				Message: fmt.Sprintf("Performing finalizer operations for the custom resource: %s ", {{ lower .Resource.Kind }}.Name)})
 
 			if err := r.Status().Update(ctx, {{ lower .Resource.Kind }}); err != nil {
@@ -228,7 +229,7 @@ func (r *{{ .Resource.Kind }}Reconciler) Reconcile(ctx context.Context, req ctrl
 			}
 
 			meta.SetStatusCondition(&{{ lower .Resource.Kind }}.Status.Conditions, metav1.Condition{Type: typeDegraded{{ .Resource.Kind }},
-				Status: metav1.ConditionTrue, Reason: "Finalizing",
+				Status: metav1.ConditionTrue, Reason: reasonFinalizing,
 				Message: fmt.Sprintf("Finalizer operations for custom resource %s name were successfully accomplished", {{ lower .Resource.Kind }}.Name)})
 
 			if err := r.Status().Update(ctx, {{ lower .Resource.Kind }}); err != nil {
@@ -262,7 +263,7 @@ func (r *{{ .Resource.Kind }}Reconciler) Reconcile(ctx context.Context, req ctrl
 
 			// The following implementation will update the status
 			meta.SetStatusCondition(&{{ lower .Resource.Kind }}.Status.Conditions, metav1.Condition{Type: typeAvailable{{ .Resource.Kind }},
-				Status: metav1.ConditionFalse, Reason: "Reconciling",
+				Status: metav1.ConditionFalse, Reason: reasonReconciling,
 				Message: fmt.Sprintf("Failed to create Deployment for the custom resource (%s): (%s)", {{ lower .Resource.Kind }}.Name, err)})
 
 			if err := r.Status().Update(ctx, {{ lower .Resource.Kind }}); err != nil {
@@ -302,7 +303,7 @@ func (r *{{ .Resource.Kind }}Reconciler) Reconcile(ctx context.Context, req ctrl
 	// Therefore, the following code will ensure the Deployment size is the same as defined
 	// via the Size spec of the Custom Resource which we are reconciling.
 	if found.Spec.Replicas == nil || *found.Spec.Replicas != desiredReplicas {
-		found.Spec.Replicas = ptr.To(desiredReplicas)
+		found.Spec.Replicas = new(desiredReplicas)
 		if err = r.Update(ctx, found); err != nil {
 			log.Error(err, "Failed to update Deployment",
 				"Deployment.Namespace", found.Namespace, "Deployment.Name", found.Name)
@@ -332,12 +333,12 @@ func (r *{{ .Resource.Kind }}Reconciler) Reconcile(ctx context.Context, req ctrl
 		// Now, that we update the size we want to requeue the reconciliation
 		// so that we can ensure that we have the latest state of the resource before
 		// update. Also, it will help ensure the desired state on the cluster
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
 	// The following implementation will update the status
 	meta.SetStatusCondition(&{{ lower .Resource.Kind }}.Status.Conditions, metav1.Condition{Type: typeAvailable{{ .Resource.Kind }},
-		Status: metav1.ConditionTrue, Reason: "Reconciling",
+		Status: metav1.ConditionTrue, Reason: reasonReconciling,
 		Message: fmt.Sprintf("Deployment for custom resource (%s) with %d replicas created successfully", {{ lower .Resource.Kind }}.Name, desiredReplicas)})
 
 	if err := r.Status().Update(ctx, {{ lower .Resource.Kind }}); err != nil {
@@ -423,7 +424,7 @@ func (r *{{ .Resource.Kind }}Reconciler) deploymentFor{{ .Resource.Kind }}(
 					//	 },
 					// },
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: ptr.To(true),
+						RunAsNonRoot: new(true),
 						// IMPORTANT: seccomProfile was introduced with Kubernetes 1.19
 						// If you are looking for to produce solutions to be supported
 						// on lower versions you must remove this option.

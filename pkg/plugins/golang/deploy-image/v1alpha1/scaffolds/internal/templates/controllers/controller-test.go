@@ -34,8 +34,7 @@ type ControllerTest struct {
 	machinery.BoilerplateMixin
 	machinery.ResourceMixin
 
-	Port        string
-	PackageName string
+	Port string
 }
 
 // SetTemplateDefaults implements machinery.Template
@@ -50,7 +49,6 @@ func (f *ControllerTest) SetTemplateDefaults() error {
 	f.Path = f.Resource.Replacer().Replace(f.Path)
 	log.Info(f.Path)
 
-	f.PackageName = "controller"
 	f.IfExistsAction = machinery.OverwriteFile
 
 	log.Info("creating import for resource", "resource", f.Resource.Path)
@@ -61,7 +59,11 @@ func (f *ControllerTest) SetTemplateDefaults() error {
 
 const controllerTestTemplate = `{{ .Boilerplate }}
 
-package {{ if and .MultiGroup .Resource.Group }}{{ .Resource.PackageName }}{{ else }}{{ .PackageName }}{{ end }}
+{{if and .MultiGroup .Resource.Group }}
+package {{ .Resource.PackageName }}
+{{else}}
+package controller
+{{end}}
 
 import (
 	"context"
@@ -70,13 +72,12 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	{{ if not (isEmptyStr .Resource.Path) -}}
@@ -127,7 +128,7 @@ var _ = Describe("{{ .Resource.Kind }} controller", func() {
 						Namespace: namespace.Name,
 					},
 					Spec: {{ .Resource.ImportAlias }}.{{ .Resource.Kind }}Spec{
-						Size: ptr.To(int32(1)),
+						Size: new(int32(1)),
 						{{ if not (isEmptyStr .Port) -}}
 						ContainerPort: {{ .Port }},
 						{{- end }}
@@ -196,7 +197,7 @@ var _ = Describe("{{ .Resource.Kind }} controller", func() {
 				HaveField("Type", Equal(typeAvailable{{ .Resource.Kind }})), &conditions))
 			Expect(conditions).To(HaveLen(1), "Multiple conditions of type %s", typeAvailable{{ .Resource.Kind }})
 			Expect(conditions[0].Status).To(Equal(metav1.ConditionTrue), "condition %s", typeAvailable{{ .Resource.Kind }})
-			Expect(conditions[0].Reason).To(Equal("Reconciling"), "condition %s", typeAvailable{{ .Resource.Kind }})
+			Expect(conditions[0].Reason).To(Equal(reasonReconciling), "condition %s", typeAvailable{{ .Resource.Kind }})
 		})
 	})
 })

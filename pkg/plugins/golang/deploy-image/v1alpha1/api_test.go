@@ -23,6 +23,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/spf13/afero"
+	"github.com/spf13/pflag"
 
 	"sigs.k8s.io/kubebuilder/v4/pkg/config"
 	cfgv3 "sigs.k8s.io/kubebuilder/v4/pkg/config/v3"
@@ -47,8 +48,8 @@ var _ = Describe("createAPISubcommand", func() {
 		subCmd.options = &goPlugin.Options{}
 		res = &resource.Resource{
 			GVK: resource.GVK{
-				Group:   "example.com",
-				Domain:  "test.io",
+				Group:   exampleDomain,
+				Domain:  testIODomain,
 				Version: "v1alpha1",
 				Kind:    "Memcached",
 			},
@@ -59,6 +60,16 @@ var _ = Describe("createAPISubcommand", func() {
 
 		fs = machinery.Filesystem{FS: afero.NewMemMapFs()}
 		Expect(subCmd.InjectConfig(cfg)).To(Succeed())
+	})
+
+	Context("BindFlags", func() {
+		It("should not expose the --ssa flag since Server-Side Apply is not supported", func() {
+			flagSet := pflag.NewFlagSet("create-api", pflag.ContinueOnError)
+			subCmd.BindFlags(flagSet)
+
+			Expect(flagSet.Lookup("image")).NotTo(BeNil())
+			Expect(flagSet.Lookup("ssa")).To(BeNil())
+		})
 	})
 
 	Context("PreScaffold validation", func() {
@@ -97,7 +108,7 @@ var _ = Describe("createAPISubcommand", func() {
 
 		It("should check for cmd/main.go in go/v4 projects", func() {
 			subCmd.image = "busybox:1.36.1"
-			_ = cfg.SetPluginChain([]string{"go.kubebuilder.io/v4"})
+			_ = cfg.SetPluginChain([]string{pluginGoKubebuilder})
 
 			tmpDir, err := os.MkdirTemp("", "deploy-image-test")
 			Expect(err).NotTo(HaveOccurred())
@@ -152,7 +163,7 @@ var _ = Describe("createAPISubcommand", func() {
 			firstRes := resource.Resource{
 				GVK: resource.GVK{
 					Group:   "ship",
-					Domain:  "test.io",
+					Domain:  testIODomain,
 					Version: "v1",
 					Kind:    "Frigate",
 				},
@@ -161,7 +172,7 @@ var _ = Describe("createAPISubcommand", func() {
 			}
 			Expect(cfg.AddResource(firstRes)).To(Succeed())
 
-			res.Group = "example.com"
+			res.Group = exampleDomain
 			res.Plural = "memcacheds"
 
 			err := subCmd.InjectResource(res)
@@ -176,7 +187,7 @@ var _ = Describe("createAPISubcommand", func() {
 			firstRes := resource.Resource{
 				GVK: resource.GVK{
 					Group:   "ship",
-					Domain:  "test.io",
+					Domain:  testIODomain,
 					Version: "v1",
 					Kind:    "Frigate",
 				},
@@ -185,7 +196,7 @@ var _ = Describe("createAPISubcommand", func() {
 			}
 			Expect(cfg.AddResource(firstRes)).To(Succeed())
 
-			res.Group = "example.com"
+			res.Group = exampleDomain
 
 			Expect(subCmd.InjectResource(res)).To(Succeed())
 		})

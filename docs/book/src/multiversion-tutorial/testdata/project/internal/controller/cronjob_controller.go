@@ -108,7 +108,7 @@ var (
 // the user.
 //
 // For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/reconcile
+// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/reconcile
 // nolint:gocyclo
 func (r *CronJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -396,16 +396,20 @@ func (r *CronJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		slices.SortStableFunc(failedJobs, func(a, b *kbatch.Job) int {
 			aStartTime := a.Status.StartTime
 			bStartTime := b.Status.StartTime
-			if aStartTime == nil && bStartTime != nil {
-				return 1
-			}
-
-			if aStartTime.Before(bStartTime) {
+			switch {
+			case aStartTime == nil && bStartTime == nil:
+				return 0
+			case aStartTime == nil:
 				return -1
-			} else if bStartTime.Before(aStartTime) {
+			case bStartTime == nil:
 				return 1
+			case aStartTime.Before(bStartTime):
+				return -1
+			case bStartTime.Before(aStartTime):
+				return 1
+			default:
+				return 0
 			}
-			return 0
 		})
 		for i, job := range failedJobs {
 			if int32(i) >= int32(len(failedJobs))-*cronJob.Spec.FailedJobsHistoryLimit {
@@ -423,16 +427,20 @@ func (r *CronJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		slices.SortStableFunc(successfulJobs, func(a, b *kbatch.Job) int {
 			aStartTime := a.Status.StartTime
 			bStartTime := b.Status.StartTime
-			if aStartTime == nil && bStartTime != nil {
-				return 1
-			}
-
-			if aStartTime.Before(bStartTime) {
+			switch {
+			case aStartTime == nil && bStartTime == nil:
+				return 0
+			case aStartTime == nil:
 				return -1
-			} else if bStartTime.Before(aStartTime) {
+			case bStartTime == nil:
 				return 1
+			case aStartTime.Before(bStartTime):
+				return -1
+			case bStartTime.Before(aStartTime):
+				return 1
+			default:
+				return 0
 			}
-			return 0
 		})
 		for i, job := range successfulJobs {
 			if int32(i) >= int32(len(successfulJobs))-*cronJob.Spec.SuccessfulJobsHistoryLimit {
@@ -662,7 +670,9 @@ func (r *CronJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	job, err := constructJobForCronJob(&cronJob, missedRun)
 	if err != nil {
 		log.Error(err, "unable to construct job from template")
-		// don't bother requeuing until we get a change to the spec
+		// don't retry immediately; this failure occurred while constructing the Job.
+		// we'll reconcile again at the next scheduled run, and updates to the CronJob
+		// can also trigger reconciliation sooner
 		return scheduledResult, nil
 	}
 

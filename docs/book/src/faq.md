@@ -5,22 +5,22 @@
 <p class="note-title"> Controller-Runtime FAQ </p>
 
 Kubebuilder is developed on top of the [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime)
-and [controller-tools](https://github.com/kubernetes-sigs/controller-tools) libraries. We recommend you also check
+and [controller-tools](https://github.com/kubernetes-sigs/controller-tools) libraries. Also check
 the [Controller-Runtime FAQ page](https://github.com/kubernetes-sigs/controller-runtime/blob/main/FAQ.md).
 </aside>
 
 
 ## How does the value informed via the domain flag (i.e. `kubebuilder init --domain example.com`) when we init a project?
 
-After creating a project, usually you will want to extend the Kubernetes APIs and define new APIs which will be owned by your project. Therefore, the domain value is tracked in the [PROJECT][project-file-def] file which defines the config of your project and will be used as a domain to create the endpoints of your API(s). Please, ensure that you understand the [Groups and Versions and Kinds, oh my!][gvk].
+After creating a project, you usually want to extend the Kubernetes APIs and define new APIs which your project owns. Therefore, Kubebuilder tracks the domain value in the [PROJECT][project-file-def] file which defines your project's config and uses it as a domain to create the endpoints of your API(s). Please, ensure that you understand the [Groups and Versions and Kinds, oh my!][gvk].
 
 The domain is for the group suffix, to explicitly show the resource group category.
 For example, if set `--domain=example.com`:
-```
+```bash
 kubebuilder init --domain example.com --repo xxx --plugins=go/v4
 kubebuilder create api --group mygroup --version v1beta1 --kind Mykind
 ```
-Then the result resource group will be `mygroup.example.com`.
+Then the result resource group is `mygroup.example.com`.
 
 > If domain field not set, the default value is `my.domain`.
 
@@ -45,8 +45,8 @@ with:
 ## After `make run`, I see errors like "unable to find leader election namespace: not running in-cluster..."
 
 You can enable the leader election. However, if you are testing the project locally using the `make run`
-target which will run the manager outside of the cluster then, you might also need to set the
-namespace the leader election resource will be created, as follows:
+target which runs the manager outside of the cluster then, you might also need to set the
+namespace where the manager creates the leader election resource, as follows:
 ```go
 mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                  scheme,
@@ -58,7 +58,7 @@ mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		LeaderElectionNamespace: "<project-name>-system",
 ```
 
-If you are running the project on the cluster with `make deploy` target
+If you run the project on the cluster with the `make deploy` target
 then, you might not want to add this option. So, you might want to customize this behaviour using
 environment variables to only add this option for development purposes, such as:
 
@@ -82,7 +82,7 @@ environment variables to only add this option for development purposes, such as:
 ## I am facing the error "open /var/run/secrets/kubernetes.io/serviceaccount/token: permission denied" when I deploy my project against Kubernetes old versions. How to sort it out?
 
 If you are facing the error:
-```
+```text
 1.6656687258729894e+09  ERROR   controller-runtime.client.config        unable to get kubeconfig        {"error": "open /var/run/secrets/kubernetes.io/serviceaccount/token: permission denied"}
 sigs.k8s.io/controller-runtime/pkg/client/config.GetConfigOrDie
         /go/pkg/mod/sigs.k8s.io/controller-runtime@v0.13.0/pkg/client/config/config.go:153
@@ -91,7 +91,7 @@ main.main
 runtime.main
         /usr/local/go/src/runtime/proc.go:250
 ```
-when you are running the project against a Kubernetes old version (maybe <= 1.21) , it might be caused by the [issue][permission-issue] , the reason is the mounted token file set to `0600`, see [solution][permission-PR] here. Then, the workaround is:
+when you run the project against a Kubernetes old version (maybe <= 1.21), it might be caused by the [issue][permission-issue]. The reason is that Kubernetes sets the mounted token file to `0600`, see [solution][permission-PR] here. Then, the workaround is:
 
 Add `fsGroup` in the manager.yaml
 ```yaml
@@ -105,13 +105,11 @@ However, note that this problem is fixed and will not occur if you deploy the pr
 
 When attempting to run `make install` to apply the CRD manifests, the error `Too long: must have at most 262144 bytes may be encountered.` This error arises due to a size limit enforced by the Kubernetes API. Note that the `make install` target will apply the CRD manifest under `config/crd` using `kubectl apply -f -`. Therefore, when the apply command is used, the API annotates the object with the `last-applied-configuration` which contains the entire previous configuration. If this configuration is too large, it will exceed the allowed byte size. ([More info][k8s-obj-creation])
 
-In ideal approach might use client-side apply might seem like the perfect solution since with the entire object configuration doesn't have to be stored as an annotation (last-applied-configuration) on the server. However, it's worth noting that as of now, it isn't supported by controller-gen or kubebuilder. For more on this, refer to: [Controller-tool-discussion][controller-tool-pr].
-
-Therefore, you have a few options to workround this scenario such as:
+You have a few options to work around this scenario such as:
 
 **By removing the descriptions from CRDs:**
 
-Your CRDs are generated using [controller-gen][controller-gen]. By using the option `maxDescLen=0` to remove the description, you may reduce the size, potentially resolving the issue. To do it you can update the Makefile as the following example and then, call the target `make manifest` to regenerate your CRDs without description, see:
+[Controller-gen][controller-gen] generates your CRDs. By using the option `maxDescLen=0` to remove the description, you may reduce the size, potentially resolving the issue. To do it you can update the Makefile as the following example and then, call the target `make manifest` to regenerate your CRDs without description, see:
 
 ```shell
 
@@ -119,13 +117,33 @@ Your CRDs are generated using [controller-gen][controller-gen]. By using the opt
  manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
      # Note that the option maxDescLen=0 was added in the default scaffold in order to sort out the issue
      # Too long: must have at most 262144 bytes. By using kubectl apply to create / update resources an annotation
-     # is created by K8s API to store the latest version of the resource ( kubectl.kubernetes.io/last-applied-configuration).
+     # that the K8s API creates to store the latest version of the resource ( kubectl.kubernetes.io/last-applied-configuration).
      # However, it has a size limit and if the CRD is too big with so many long descriptions as this one it will cause the failure.
  	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:maxDescLen=0 webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 ```
 **By re-design your APIs:**
 
 You can review the design of your APIs and see if it has not more specs than should be by hurting single responsibility principle for example. So that you might to re-design them.
+
+**By using Server-Side Apply for CRD installation:**
+
+Since this issue happens when CRDs are installed with client-side apply, another option is to install or update the CRDs with Server-Side Apply instead, for example by using `kubectl apply --server-side -f ...`. This avoids storing the full manifest in the `kubectl.kubernetes.io/last-applied-configuration` annotation and can prevent the size-limit failure.
+
+If you are updating existing CRDs, `kubectl replace -f ...` may also help, depending on your workflow.
+
+<aside class="note warning" role="note">
+<p class="note-title">Server-Side Apply Flag vs kubectl Server-Side Apply</p>
+
+Don't confuse the `kubectl apply --server-side` command mentioned above with the `--ssa` flag in Kubebuilder. They are different concepts:
+
+- **`kubectl apply --server-side`** (discussed above): A kubectl flag that changes how CRDs are installed to avoid the annotation size limit. This is about CRD installation only.
+
+- **`--ssa` flag**: A Kubebuilder flag (e.g., `kubebuilder create api --ssa`) that scaffolds controllers with runtime behavior for managing resource fields using Server-Side Apply patterns. This is about controller runtime behavior, specifically for scenarios where your controller shares field ownership with users or other controllers. It does NOT change how `make install` applies CRDs.
+
+See the [Kubernetes Server-Side Apply documentation][k8s-ssa-docs] to learn more about the Server-Side Apply concept in general.
+
+If you have APIs that do not use Server-Side Apply, ensure they have the `+kubebuilder:ac:generate=false` marker. If you added APIs manually to your project, review them to ensure every kind that should not use Server-Side Apply has this marker. See the [Server-Side Apply](./reference/server-side-apply.md) reference for details.
+</aside>
 
 ## How can I validate and parse fields in CRDs effectively?
 
@@ -158,7 +176,56 @@ type StructName struct {
 - Users still receive error notifications from the Kubernetes API for invalid `timeField` values.
 - Developers can directly use the parsed TimeField in their code without additional parsing, reducing errors and improving efficiency.
 
+## When I build the image with Podman or Buildah, the build fails with `cmd/main.go: no such file or directory`. How to solve it?
 
+While we do our best to keep the scaffold working with other container tools, Kubebuilder is officially tested and supported with **Docker**.
+
+The scaffolded `.dockerignore` re-includes all Go source files with `!**/*.go`. Docker honors this pattern. Podman and Buildah do not: they skip ignored directories, so no Go source reaches the build context. This is tracked upstream in [buildah#6417][dockerignore-buildah-issue] and was reported in [kubebuilder#5181][dockerignore-kb-issue].
+
+If you use Podman, re-include your source directories by name in `.dockerignore`:
+
+```text
+!cmd
+!api
+!internal
+```
+
+Add any other directory in your project that holds Go source files.
+
+## When I build the image with Podman or Buildah I get `short-name "golang:1.26" did not resolve to an alias and no unqualified-search registries are defined`. How to solve it?
+
+While we do our best to keep the scaffold working with other container tools, Kubebuilder is officially tested and supported with **Docker**.
+
+Docker resolves short image names to Docker Hub. Podman and Buildah resolve them from the host, using either the [short-name aliases][podman-shortnames] in [`registries.conf.d`][podman-registries-conf-d] or `unqualified-search-registries` in [`registries.conf`][podman-registries-conf]. You hit this error when the host has neither. Debian 12, for example, ships neither.
+
+Use one of the options below.
+
+**Override the base image.** The scaffolded `Dockerfile` exposes it as a [build argument][docker-arg-from]:
+
+```dockerfile
+ARG BASE_IMAGE=golang:1.26
+FROM ${BASE_IMAGE} AS builder
+```
+
+```sh
+# From Docker Hub
+make docker-build IMG=<some-registry>/<project>:tag BASE_IMAGE=docker.io/library/golang:1.26
+
+# From your own registry or mirror
+make docker-build IMG=<some-registry>/<project>:tag BASE_IMAGE=<myregistry>/golang:1.26
+```
+
+`make docker-buildx` accepts `BASE_IMAGE` too.
+
+**Or add an alias on the host** for the `golang` short name:
+
+```toml
+# /etc/containers/registries.conf.d/golang.conf
+[aliases]
+"golang" = "docker.io/library/golang"
+```
+
+A matching alias is used without consulting `unqualified-search-registries`, so it works even when that list is empty. It also ignores the tag, so one entry covers all `golang` tags. Prefer it over adding `docker.io` to the search list, which changes how every unqualified image name resolves on the host. For rootless Podman, use `$HOME/.config/containers/registries.conf.d/golang.conf`.
 
 [k8s-obj-creation]: https://kubernetes.io/docs/tasks/manage-kubernetes-objects/declarative-config/#how-to-create-objects
 [gvk]: ./cronjob-tutorial/gvks.md
@@ -168,4 +235,10 @@ type StructName struct {
 [permission-issue]: https://github.com/kubernetes/kubernetes/issues/82573
 [permission-PR]: https://github.com/kubernetes/kubernetes/pull/89193
 [controller-gen]: ./reference/controller-gen.html
-[controller-tool-pr]: https://github.com/kubernetes-sigs/controller-tools/pull/536
+[k8s-ssa-docs]: https://kubernetes.io/docs/reference/using-api/server-side-apply/
+[dockerignore-kb-issue]: https://github.com/kubernetes-sigs/kubebuilder/issues/5181
+[dockerignore-buildah-issue]: https://github.com/containers/buildah/issues/6417
+[podman-registries-conf]: https://github.com/containers/image/blob/main/docs/containers-registries.conf.5.md
+[podman-registries-conf-d]: https://github.com/containers/image/blob/main/docs/containers-registries.conf.d.5.md
+[podman-shortnames]: https://github.com/containers/shortnames
+[docker-arg-from]: https://docs.docker.com/reference/dockerfile/#understand-how-arg-and-from-interact

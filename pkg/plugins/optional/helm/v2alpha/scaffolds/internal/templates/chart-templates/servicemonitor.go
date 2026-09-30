@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 
 	"sigs.k8s.io/kubebuilder/v4/pkg/machinery"
+	"sigs.k8s.io/kubebuilder/v4/pkg/plugins/optional/helm/v2alpha/internal/common"
 )
 
 var _ machinery.Template = &ServiceMonitor{}
@@ -44,20 +45,25 @@ func (f *ServiceMonitor) SetTemplateDefaults() error {
 	if f.Path == "" {
 		outputDir := f.OutputDir
 		if outputDir == "" {
-			outputDir = defaultOutputDir
+			outputDir = common.DefaultOutputDir
 		}
-		f.Path = filepath.Join(outputDir, "chart", "templates", "monitoring", "servicemonitor.yaml")
+		f.Path = filepath.Join(outputDir, "chart", "templates", "prometheus", "controller-manager-metrics-monitor.yaml")
 	}
 
 	chartName := f.ProjectName
 	f.TemplateBody = fmt.Sprintf(serviceMonitorTemplate, chartName, chartName, chartName, chartName)
 
-	f.IfExistsAction = machinery.OverwriteFile
+	// User-owned file: preserve local edits on regeneration unless --force is set.
+	if f.Force {
+		f.IfExistsAction = machinery.OverwriteFile
+	} else {
+		f.IfExistsAction = machinery.SkipFile
+	}
 
 	return nil
 }
 
-const serviceMonitorTemplate = `{{` + "`" + `{{- if .Values.prometheus.enable }}` + "`" + `}}
+const serviceMonitorTemplate = `{{` + "`" + `{{- if .Values.prometheus.enabled }}` + "`" + `}}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -67,39 +73,49 @@ metadata:
     helm.sh/chart: {{ "{{ .Chart.Name }}-{{ .Chart.Version | replace \"+\" \"_\" }}" }}
     app.kubernetes.io/instance: {{ "{{ .Release.Name }}" }}
     control-plane: controller-manager
+    {{ "{{- with .Values.prometheus.labels }}" }}
+` + `    {{ "{{- with omit . \"app.kubernetes.io/managed-by\" \"app.kubernetes.io/name\" \"helm.sh/chart\" \"app.kubernetes.io/instance\" \"control-plane\" }}" }}` + "\n" + //nolint:lll
+	`    {{ "{{- toYaml . | nindent 4 }}" }}
+    {{ "{{- end }}" }}
+    {{ "{{- end }}" }}
+  {{ "{{- with .Values.prometheus.annotations }}" }}
+  annotations:
+    {{ "{{- toYaml . | nindent 4 }}" }}
+  {{ "{{- end }}" }}
   name: ` +
 	`{{ "{{ include \"%s.resourceName\" " }}` +
 	`{{ "(dict \"suffix\" \"controller-manager-metrics-monitor\" \"context\" $) }}" }}
   namespace: {{ "{{ .Release.Namespace }}" }}
 spec:
   endpoints:
-    - path: /metrics
-      port: https
-      scheme: https
-      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
-      tlsConfig:
-        {{ "{{- if .Values.certManager.enable }}" }}
-        serverName: ` +
+  - {{ "{{- if .Values.metrics.secure }}" }}
+    bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+    {{ "{{- end }}" }}
+    path: /metrics
+    port: {{ "{{ if .Values.metrics.secure }}https{{ else }}http{{ end }}" }}
+    scheme: {{ "{{ if .Values.metrics.secure }}https{{ else }}http{{ end }}" }}
+    {{ "{{- if .Values.metrics.secure }}" }}
+    tlsConfig:
+      serverName: ` +
 	`{{ "{{ include \"%s.resourceName\" " }}` +
 	`{{ "(dict \"suffix\" \"controller-manager-metrics-service\" \"context\" $) }}" }}.` +
 	`{{ "{{ .Release.Namespace }}" }}.svc
-        # Apply secure TLS configuration with cert-manager
-        insecureSkipVerify: false
-        ca:
-          secret:
-            name: metrics-server-cert
-            key: ca.crt
-        cert:
-          secret:
-            name: metrics-server-cert
-            key: tls.crt
-        keySecret:
+      {{ "{{- if .Values.certManager.enabled }}" }}
+      ca:
+        secret:
           name: metrics-server-cert
-          key: tls.key
-        {{ "{{- else }}" }}
-        # Development/Test mode (insecure configuration)
-        insecureSkipVerify: true
-        {{ "{{- end }}" }}
+          key: ca.crt
+      cert:
+        secret:
+          name: metrics-server-cert
+          key: tls.crt
+      keySecret:
+        name: metrics-server-cert
+        key: tls.key
+      {{ "{{- else }}" }}
+      insecureSkipVerify: true
+      {{ "{{- end }}" }}
+    {{ "{{- end }}" }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ "{{ include \"%s.name\" . }}" }}

@@ -17,12 +17,9 @@ You can reduce the burden of keeping your project up to date by using the
 automates the process of running `kubebuilder alpha update` on a schedule
 workflow when new Kubebuilder releases are available.
 
-Moreover, you will be able to get help from [AI models][ai-gh-models] to understand what changes are needed to keep your project up to date
-and how to solve conflicts if any are faced.
-
 </aside>
 
-## When to Use It
+## When to use it
 
 Use this command when you:
 
@@ -30,7 +27,7 @@ Use this command when you:
 - Want to review scaffold changes on a separate branch
 - Want to focus on resolving merge conflicts (not re-applying your custom code)
 
-## How It Works
+## How it works
 
 You tell the tool the **new version**, and which branch has your project.
 It rebuilds both scaffolds, merges your code into the new one with a **3-way merge**,
@@ -69,13 +66,12 @@ The command creates three temporary branches:
     - `--push`: push the result to `origin` automatically.
     - `--git-config`: sets git configurations.
     - `--open-gh-issue`: create a GitHub issue with a checklist and compare link (requires `gh`).
-    - `--use-gh-models`: add an AI overview **comment** to that issue using `gh models`
 
 ### Step 5: Cleanup
 - Once the output branch is ready, all the temporary working branches are deleted.
 - You are left with one clean branch you can test, review, and merge back into your main branch.
 
-## How to Use It (commands)
+## How to use it (commands)
 
 Run from your project root:
 
@@ -98,7 +94,7 @@ kubebuilder alpha update --force
 ```
 
 Keep full history instead of squashing:
-```
+```bash
 kubebuilder alpha update --from-version v4.5.0 --to-version v4.7.0 --force --show-commits
 ```
 
@@ -131,7 +127,7 @@ kubebuilder alpha update --force \
 --conflict-message "chore: upgrade with conflicts - manual review needed"
 ```
 
-## Handling Conflicts (`--force` vs default)
+## Handling conflicts (`--force` vs default)
 
 When you use `--force`, Git finishes the merge even if there are conflicts.
 The commit will include markers like:
@@ -157,12 +153,10 @@ make manifests generate fmt vet lint-fix
 make all
 ```
 
-## Using with GitHub Issues (`--open-gh-issue`) and AI (`--use-gh-models`) assistance
+## Using with GitHub Issues (`--open-gh-issue`)
 
 Pass `--open-gh-issue` to have the command create a GitHub **Issue** in your repository
-to assist with the update. Also, if you also pass `--use-gh-models`, the tool posts a follow-up comment
-on that Issue with an AI-generated overview of the most important changes plus brief conflict-resolution
-guidance.
+to assist with the update.
 
 ### Examples
 
@@ -171,29 +165,17 @@ Create an Issue with a compare link:
 kubebuilder alpha update --open-gh-issue
 ```
 
-Create an Issue **and** add an AI summary:
-```shell
-kubebuilder alpha update --open-gh-issue --use-gh-models
-```
-
 ### What you’ll see
 
 The command opens an Issue that links to the diff so you can create the PR and review it, for example:
 
 <img width="638" height="482" alt="Example Issue" src="https://github.com/user-attachments/assets/589fd16b-7709-4cd5-b169-fd53d69790d4" />
 
-With `--use-gh-models`, an AI comment highlights key changes and suggests how to resolve any conflicts:
-
-<img width="740" height="425" alt="Comment" src="https://github.com/user-attachments/assets/fb5f214e-be0e-43b8-a3fb-b5744ac8f66e" />
-
-Moreover, AI models are used to help you understand what changes are needed to keep your project up to date,
-and to suggest resolutions if conflicts are encountered, as in the following example:
-
 ### Automation
 
 This integrates cleanly with automation. The [`autoupdate.kubebuilder.io/v1-alpha`][autoupdate-plugin] plugin can scaffold a GitHub Actions workflow that runs the command on a schedule (e.g., weekly). When a new Kubebuilder release is available, it opens an Issue with a compare link so you can create the PR and review it.
 
-## Changing Extra Git configs only during the run (does not change your ~/.gitconfig)_
+## Changing extra Git configs only during the run (does not change your ~/.gitconfig)
 
 By default, `kubebuilder alpha update` applies safe Git configs:
 `merge.renameLimit=999999`, `diff.renameLimit=999999`, `merge.conflictStyle=merge`
@@ -227,7 +209,7 @@ If yours is older, first run `kubebuilder alpha generate` once to modernize the 
 After that, you can use `kubebuilder alpha update` for future upgrades.
 
 Projects created with **Kubebuilder v4.6.0+** include `cliVersion` in the `PROJECT` file.
-We use that value to pick the correct CLI for re-scaffolding.
+The command uses that value to pick the correct CLI for re-scaffolding.
 
 </aside>
 
@@ -247,7 +229,6 @@ We use that value to pick the correct CLI for re-scaffolding.
 | `--restore-path`   | Repeatable. Paths to preserve from the base branch when squashing (e.g., `.github/workflows`). **Not supported** with `--show-commits`.                                                                                                 |
 | `--show-commits`   | Keep full history (do not squash). **Not compatible** with `--restore-path`.                                                                                                                                                            |
 | `--to-version`     | Kubebuilder release to update **to** (e.g., `v4.7.0`). If unset, defaults to the latest available release.                                                                                                                              |
-| `--use-gh-models`  | Post an AI overview as an issue comment using `gh models`. Requires `gh` + `gh-models` extension. Effective only when `--open-gh-issue` is also set.                                                                                    |
 | `-h, --help`       | Show help for this command.                                                                                                                                                                                                             |
 
 ## Demonstration
@@ -263,7 +244,7 @@ so the current behavior may differ slightly from what is shown in the demo.
 
 </aside>
 
-## Further Resources
+## Further resources
 
 - [AutoUpdate Plugin][autoupdate-plugin]
 - [Design proposal for update automation][design-proposal]
@@ -272,4 +253,3 @@ so the current behavior may differ slightly from what is shown in the demo.
 [project-config]: ../../reference/project-config.md
 [autoupdate-plugin]: ./../../plugins/available/autoupdate-v1-alpha.md
 [design-proposal]: ./../../../../../designs/update_action.md
-[ai-gh-models]: https://docs.github.com/en/github-models/about-github-models

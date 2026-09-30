@@ -18,6 +18,7 @@ package gettingstarted
 
 import (
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 
@@ -42,6 +43,7 @@ func NewSample(binaryPath, samplePath string) Sample {
 func (sp *Sample) UpdateTutorial() {
 	sp.updateAPI()
 	sp.updateSample()
+	sp.updateConditions()
 	sp.updateController()
 	sp.updateControllerTest()
 }
@@ -53,7 +55,6 @@ func (sp *Sample) updateControllerTest() {
 		". \"github.com/onsi/gomega\"",
 		`. "github.com/onsi/gomega"
 
-	"k8s.io/utils/ptr"
 	appsv1 "k8s.io/api/apps/v1"`,
 	)
 	hackutils.CheckError("add imports apis", err)
@@ -62,7 +63,7 @@ func (sp *Sample) updateControllerTest() {
 		filepath.Join(sp.ctx.Dir, file),
 		"// TODO(user): Specify other spec details if needed.",
 		`Spec: cachev1alpha1.MemcachedSpec{
-						Size: ptr.To(int32(1)),
+						Size: new(int32(1)),
 					},`,
 	)
 	hackutils.CheckError("add spec apis", err)
@@ -90,7 +91,7 @@ func (sp *Sample) updateControllerTest() {
 				HaveField("Type", Equal(typeAvailableMemcached)), &conditions))
 			Expect(conditions).To(HaveLen(1), "Multiple conditions of type %s", typeAvailableMemcached)
 			Expect(conditions[0].Status).To(Equal(metav1.ConditionTrue), "condition %s", typeAvailableMemcached)
-			Expect(conditions[0].Reason).To(Equal("Reconciling"), "condition %s", typeAvailableMemcached)`,
+			Expect(conditions[0].Reason).To(Equal(reasonReconciling), "condition %s", typeAvailableMemcached)`,
 	)
 	hackutils.CheckError("add spec apis", err)
 }
@@ -125,6 +126,12 @@ func (sp *Sample) updateSample() {
 	file := filepath.Join(sp.ctx.Dir, "config/samples/cache_v1alpha1_memcached.yaml")
 	err := pluginutil.ReplaceInFile(file, "# TODO(user): Add fields here", sampleSizeFragment)
 	hackutils.CheckError("update sample to add size", err)
+}
+
+func (sp *Sample) updateConditions() {
+	path := filepath.Join(sp.ctx.Dir, "internal/controller/conditions.go")
+	err := os.WriteFile(path, []byte(controllerConditionsFile), 0o644)
+	hackutils.CheckError("write conditions.go", err)
 }
 
 func (sp *Sample) updateController() {
@@ -229,13 +236,8 @@ func (sp *Sample) GenerateSampleProject() {
 
 // CodeGen will call targets to generate code
 func (sp *Sample) CodeGen() {
-	// Pin google.golang.org/grpc to the patched version (CVE: SNYK-GOLANG-GOOGLEGOLANGORGGRPC-15691172)
-	cmd := exec.Command("go", "get", "google.golang.org/grpc@v1.79.3")
+	cmd := exec.Command("go", "mod", "tidy")
 	_, err := sp.ctx.Run(cmd)
-	hackutils.CheckError("Failed to pin google.golang.org/grpc for getting started tutorial", err)
-
-	cmd = exec.Command("go", "mod", "tidy")
-	_, err = sp.ctx.Run(cmd)
 	hackutils.CheckError("Failed to run go mod tidy all for getting started tutorial", err)
 
 	cmd = exec.Command("make", "all")
@@ -276,7 +278,6 @@ const controllerImports = `"context"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 `
 
 const controllerStatusTypes = `
@@ -284,7 +285,33 @@ const controllerStatusTypes = `
 const (
 	// typeAvailableMemcached represents the status of the Deployment reconciliation
 	typeAvailableMemcached = "Available"
-)`
+)
+
+const memcachedContainerName = "memcached"
+`
+
+const controllerConditionsFile = `/*
+Copyright 2026 The Kubernetes authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+const (
+	reasonReconciling = "Reconciling"
+)
+`
 
 const controllerInfoReconcileOld = `// TODO(user): Modify the Reconcile function to compare the state specified by
 // the Memcached object against the actual cluster state, and then
@@ -319,7 +346,7 @@ const controllerReconcileImplementation = `// Fetch the Memcached instance
 
 	// Let's just set the status as Unknown when no status is available
 	if len(memcached.Status.Conditions) == 0 {
-		meta.SetStatusCondition(&memcached.Status.Conditions, metav1.Condition{Type: typeAvailableMemcached, Status: metav1.ConditionUnknown, Reason: "Reconciling", Message: "Starting reconciliation"})
+		meta.SetStatusCondition(&memcached.Status.Conditions, metav1.Condition{Type: typeAvailableMemcached, Status: metav1.ConditionUnknown, Reason: reasonReconciling, Message: "Starting reconciliation"})
 		if err = r.Status().Update(ctx, memcached); err != nil {
 			log.Error(err, "Failed to update Memcached status")
 			return ctrl.Result{}, err
@@ -347,7 +374,7 @@ const controllerReconcileImplementation = `// Fetch the Memcached instance
 
 			// The following implementation will update the status
 			meta.SetStatusCondition(&memcached.Status.Conditions, metav1.Condition{Type: typeAvailableMemcached,
-				Status: metav1.ConditionFalse, Reason: "Reconciling",
+				Status: metav1.ConditionFalse, Reason: reasonReconciling,
 				Message: fmt.Sprintf("Failed to create Deployment for the custom resource (%s): (%s)", memcached.Name, err)})
 
 			if err := r.Status().Update(ctx, memcached); err != nil {
@@ -387,7 +414,7 @@ const controllerReconcileImplementation = `// Fetch the Memcached instance
 	// Therefore, the following code will ensure the Deployment size is the same as defined
 	// via the Size spec of the Custom Resource which we are reconciling.
 	if found.Spec.Replicas == nil || *found.Spec.Replicas != desiredReplicas {
-		found.Spec.Replicas = ptr.To(desiredReplicas)
+		found.Spec.Replicas = new(desiredReplicas)
 		if err = r.Update(ctx, found); err != nil {
 			log.Error(err, "Failed to update Deployment",
 				"Deployment.Namespace", found.Namespace, "Deployment.Name", found.Name)
@@ -417,12 +444,12 @@ const controllerReconcileImplementation = `// Fetch the Memcached instance
 		// Now, that we update the size we want to requeue the reconciliation
 		// so that we can ensure that we have the latest state of the resource before
 		// update. Also, it will help ensure the desired state on the cluster
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
 	// The following implementation will update the status
 	meta.SetStatusCondition(&memcached.Status.Conditions, metav1.Condition{Type: typeAvailableMemcached,
-		Status: metav1.ConditionTrue, Reason: "Reconciling",
+		Status: metav1.ConditionTrue, Reason: reasonReconciling,
 		Message: fmt.Sprintf("Deployment for custom resource (%s) with %d replicas created successfully", memcached.Name, desiredReplicas)})
 
 	if err := r.Status().Update(ctx, memcached); err != nil {
@@ -451,21 +478,21 @@ func (r *MemcachedReconciler) deploymentForMemcached(
 				},
 				Spec: corev1.PodSpec{
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: ptr.To(true),
+						RunAsNonRoot: new(true),
 						SeccompProfile: &corev1.SeccompProfile{
 							Type: corev1.SeccompProfileTypeRuntimeDefault,
 						},
 					},
 					Containers: []corev1.Container{{
 						Image:           image,
-						Name:            "memcached",
+						Name:            memcachedContainerName,
 						ImagePullPolicy: corev1.PullIfNotPresent,
 						// Ensure restrictive context for the container
 						// More info: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
 						SecurityContext: &corev1.SecurityContext{
-							RunAsNonRoot:             ptr.To(true),
-							RunAsUser:                ptr.To(int64(1001)),
-							AllowPrivilegeEscalation: ptr.To(false),
+							RunAsNonRoot:             new(true),
+							RunAsUser:                new(int64(1001)),
+							AllowPrivilegeEscalation: new(false),
 							Capabilities: &corev1.Capabilities{
 								Drop: []corev1.Capability{
 									"ALL",
@@ -474,7 +501,7 @@ func (r *MemcachedReconciler) deploymentForMemcached(
 						},
 						Ports: []corev1.ContainerPort{{
 							ContainerPort: 11211,
-							Name:          "memcached",
+							Name:          memcachedContainerName,
 						}},
 						Command: []string{"memcached", "--memory-limit=64", "-o", "modern", "-v"},
 					}},

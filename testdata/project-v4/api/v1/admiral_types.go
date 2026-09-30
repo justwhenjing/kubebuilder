@@ -18,6 +18,7 @@ package v1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -59,6 +60,7 @@ type AdmiralStatus struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:ac:generate=false
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:path=admirales,scope=Cluster
 
@@ -89,5 +91,8 @@ type AdmiralList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&Admiral{}, &AdmiralList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(SchemeGroupVersion, &Admiral{}, &AdmiralList{})
+		return nil
+	})
 }

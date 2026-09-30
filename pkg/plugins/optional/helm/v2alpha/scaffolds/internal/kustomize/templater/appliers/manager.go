@@ -1,0 +1,1392 @@
+/*
+Copyright 2026 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package appliers
+
+import (
+	"fmt"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+
+	"sigs.k8s.io/kubebuilder/v4/pkg/plugins/optional/helm/v2alpha/internal/common"
+)
+
+type metadataPosition int
+
+const (
+	positionStart metadataPosition = iota
+	positionDeploymentMetadata
+	positionAfterDeploymentMetadata
+	positionPodMetadata
+)
+
+type blockType int
+
+const (
+	blockNone blockType = iota
+	blockDeploymentLabels
+	blockDeploymentAnnotations
+	blockPodLabels
+	blockPodAnnotations
+)
+
+type customFieldsState struct {
+	position                metadataPosition
+	deploymentMetadataDepth int
+
+	addedLabelsToDeployment      bool
+	addedPodLabels               bool
+	addedAnnotationsToDeployment bool
+	addedPodAnnotations          bool
+	hasDeploymentAnnotations     bool
+
+	currentBlock       blockType
+	currentBlockIndent int
+}
+
+// TemplateDeploymentFields applies all Deployment-specific transformations.
+func TemplateDeploymentFields(detectedPrefix, chartName, yamlContent string) string {
+	yamlContent = templateReplicas(yamlContent)
+	yamlContent = templateImageReference(yamlContent)
+	yamlContent = TemplateServiceAccountNameInDeployment(detectedPrefix, chartName, yamlContent)
+	yamlContent = templateEnvironmentVariables(yamlContent)
+	yamlContent = templateImagePullSecrets(yamlContent)
+	yamlContent = templatePodSecurityContext(yamlContent)
+	yamlContent = templateContainerSecurityContext(yamlContent)
+	yamlContent = templateResources(yamlContent)
+	yamlContent = templateSecurityContexts(yamlContent)
+	yamlContent = templateVolumeMounts(yamlContent)
+	yamlContent = templateVolumes(yamlContent)
+	yamlContent = templateControllerManagerArgs(yamlContent)
+	yamlContent = templateBasicWithStatement(
+		yamlContent,
+		"nodeSelector",
+		"spec.template.spec",
+		".Values.manager.nodeSelector",
+	)
+	yamlContent = templateBasicWithStatement(
+		yamlContent,
+		"affinity",
+		"spec.template.spec",
+		".Values.manager.affinity",
+	)
+	yamlContent = templateBasicWithStatement(
+		yamlContent,
+		"tolerations",
+		"spec.template.spec",
+		".Values.manager.tolerations",
+	)
+
+	// Always emit these conditionals so users can enable them in values.yaml without regenerating.
+	yamlContent = templateBasicWithStatement(
+		yamlContent,
+		"strategy",
+		"spec",
+		".Values.manager.strategy",
+	)
+	yamlContent = templatePriorityClassName(yamlContent)
+	yamlContent = templateBasicWithStatement(
+		yamlContent,
+		"topologySpreadConstraints",
+		"spec.template.spec",
+		".Values.manager.topologySpreadConstraints",
+	)
+	yamlContent = templateTerminationGracePeriodSeconds(yamlContent)
+
+	return yamlContent
+}
+
+// isManagerContainerPresent reports whether yamlContent contains the manager container by literal or templated name.
+func isManagerContainerPresent(yamlContent string) bool {
+	containerName := GetDefaultContainerName(yamlContent)
+	hasLiteralName := strings.Contains(yamlContent, "name: "+containerName)
+	hasTemplatedName := strings.Contains(yamlContent, `name: {{ include "`) && strings.Contains(yamlContent, `"manager"`)
+	return hasLiteralName || hasTemplatedName
+}
+
+func templateReplicas(yamlContent string) string {
+	if strings.Contains(yamlContent, ".Values.manager.replicas") {
+		return yamlContent
+	}
+	replicasPattern := regexp.MustCompile(`(?m)^(\s*)replicas:\s*\d+\s*$`)
+	return replicasPattern.ReplaceAllString(yamlContent, "${1}replicas: {{ .Values.manager.replicas }}")
+}
+
+func AddCustomLabelsAndAnnotations(yamlContent string) string {
+	hasDeploymentLabels := strings.Contains(yamlContent, "{{- if .Values.manager.labels }}") ||
+		strings.Contains(yamlContent, "{{- with .Values.manager.labels }}")
+	hasDeploymentAnnotations := strings.Contains(yamlContent, "{{- if .Values.manager.annotations }}") ||
+		strings.Contains(yamlContent, "{{- with .Values.manager.annotations }}")
+	hasPodBlock := strings.Contains(yamlContent, "{{- with .Values.manager.pod }}")
+	hasPodLabels := hasPodBlock && strings.Contains(yamlContent, "{{- with .labels }}")
+	hasPodAnnotations := hasPodBlock && (strings.Contains(yamlContent, "{{- with .annotations }}") ||
+		strings.Contains(yamlContent, "{{- if .Values.manager.pod.annotations }}"))
+
+	lines := strings.Split(yamlContent, "\n")
+	result := make([]string, 0, len(lines))
+	state := &customFieldsState{
+		position:                     positionStart,
+		addedLabelsToDeployment:      hasDeploymentLabels,
+		addedAnnotationsToDeployment: hasDeploymentAnnotations,
+		addedPodLabels:               hasPodLabels,
+		addedPodAnnotations:          hasPodAnnotations,
+	}
+
+	for i := range lines {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+		indent, indentLen := LeadingWhitespace(line)
+
+		// Create missing annotations block if Deployment has none
+		if state.position == positionDeploymentMetadata &&
+			trimmed == common.YamlKeySpec &&
+			!state.addedAnnotationsToDeployment &&
+			!state.hasDeploymentAnnotations {
+			metadataChildIndent := strings.Repeat(" ", state.deploymentMetadataDepth) + "  "
+			result = append(result, metadataChildIndent+"{{- if .Values.manager.annotations }}")
+			result = append(result, metadataChildIndent+"annotations:")
+			childIndent := metadataChildIndent + "  "
+			childIndentWidth := strconv.Itoa(len(childIndent))
+			result = append(result, childIndent+"{{- toYaml .Values.manager.annotations | nindent "+childIndentWidth+" }}")
+			result = append(result, metadataChildIndent+"{{- end }}")
+			state.addedAnnotationsToDeployment = true
+		}
+
+		updateMetadataTracking(state, lines, i, trimmed, indentLen)
+		result = append(result, line)
+
+		result = handleDeploymentAnnotations(state, result, line, trimmed, indent, indentLen)
+		result = handleDeploymentLabels(state, result, line, trimmed, indentLen)
+		result = handlePodAnnotations(state, result, line, trimmed, indent, indentLen)
+		result = handlePodLabels(state, result, line, trimmed, indentLen)
+	}
+
+	return strings.Join(result, "\n")
+}
+
+func templateEnvironmentVariables(yamlContent string) string {
+	if !isManagerContainerPresent(yamlContent) {
+		return yamlContent
+	}
+
+	rangeStart, rangeEnd := FindManagerContainerRange(yamlContent)
+
+	lines := strings.Split(yamlContent, "\n")
+	for i := range lines {
+		if rangeStart >= 0 && (i < rangeStart || i > rangeEnd) {
+			continue
+		}
+		if strings.TrimSpace(lines[i]) != "env:" {
+			continue
+		}
+
+		indentStr, indentLen := LeadingWhitespace(lines[i])
+		end := i + 1
+		for ; end < len(lines); end++ {
+			trimmed := strings.TrimSpace(lines[end])
+			if trimmed == "" {
+				break
+			}
+			lineIndent := len(lines[end]) - len(strings.TrimLeft(lines[end], " \t"))
+			if lineIndent < indentLen {
+				break
+			}
+			if lineIndent == indentLen && !strings.HasPrefix(trimmed, "-") {
+				break
+			}
+		}
+
+		nextLine := ""
+		if i+1 < len(lines) {
+			nextLine = lines[i+1]
+		}
+		if strings.Contains(nextLine, ".Values.manager.env") || strings.Contains(nextLine, "envOverrides") {
+			return yamlContent
+		}
+
+		childIndent := indentStr + "  "
+		childIndentWidth := strconv.Itoa(len(childIndent))
+		// Env list + envOverrides (CLI --set). Secret refs go in env list.
+		hasEnv := `{{- if or .Values.manager.env (and (kindIs "map" .Values.manager.envOverrides) ` +
+			`(not (empty .Values.manager.envOverrides))) }}`
+		block := make([]string, 0, 22)
+		block = append(block,
+			indentStr+"env:",
+			indentStr+hasEnv,
+			childIndent+`{{- if .Values.manager.env }}`,
+			childIndent+"{{- toYaml .Values.manager.env | nindent "+childIndentWidth+" }}",
+			childIndent+`{{- end }}`,
+			childIndent+`{{- if kindIs "map" .Values.manager.envOverrides }}`,
+			childIndent+`{{- range $k, $v := .Values.manager.envOverrides }}`,
+			childIndent+`- name: {{ $k }}`,
+			childIndent+`  value: {{ $v | quote }}`,
+			childIndent+`{{ end }}`,
+			childIndent+`{{- end }}`,
+			childIndent+`{{- else }}`,
+			childIndent+"[]",
+			childIndent+`{{- end }}`,
+		)
+
+		newLines := append([]string{}, lines[:i]...)
+		newLines = append(newLines, block...)
+		newLines = append(newLines, lines[end:]...)
+		return strings.Join(newLines, "\n")
+	}
+
+	return yamlContent
+}
+
+func templateResources(yamlContent string) string {
+	if !isManagerContainerPresent(yamlContent) || !strings.Contains(yamlContent, "resources:") {
+		return yamlContent
+	}
+
+	rangeStart, rangeEnd := FindManagerContainerRange(yamlContent)
+
+	lines := strings.Split(yamlContent, "\n")
+	for i := range lines {
+		if rangeStart >= 0 && (i < rangeStart || i > rangeEnd) {
+			continue
+		}
+		if strings.TrimSpace(lines[i]) != "resources:" {
+			continue
+		}
+
+		indentStr, indentLen := LeadingWhitespace(lines[i])
+		end := i + 1
+		for ; end < len(lines); end++ {
+			trimmed := strings.TrimSpace(lines[end])
+			if trimmed == "" {
+				break
+			}
+			lineIndent := len(lines[end]) - len(strings.TrimLeft(lines[end], " \t"))
+			if lineIndent < indentLen {
+				break
+			}
+			if lineIndent == indentLen && !strings.Contains(trimmed, ":") {
+				break
+			}
+			if lineIndent == indentLen && strings.HasSuffix(trimmed, ":") {
+				break
+			}
+		}
+
+		if i+1 < len(lines) && strings.Contains(lines[i+1], ".Values.manager.resources") {
+			return yamlContent
+		}
+
+		childIndent := indentStr + "  "
+		childIndentWidth := strconv.Itoa(len(childIndent))
+
+		block := []string{
+			indentStr + "resources:",
+			childIndent + "{{- if .Values.manager.resources }}",
+			childIndent + "{{- toYaml .Values.manager.resources | nindent " + childIndentWidth + " }}",
+			childIndent + "{{- else }}",
+			childIndent + "{}",
+			childIndent + "{{- end }}",
+		}
+
+		newLines := append([]string{}, lines[:i]...)
+		newLines = append(newLines, block...)
+		newLines = append(newLines, lines[end:]...)
+		return strings.Join(newLines, "\n")
+	}
+
+	return yamlContent
+}
+
+func templateSecurityContexts(yamlContent string) string {
+	return yamlContent
+}
+
+func templateVolumeMounts(yamlContent string) string {
+	return appendToListFromValues(yamlContent, "volumeMounts:", ".Values.manager.extraVolumeMounts")
+}
+
+func templateVolumes(yamlContent string) string {
+	return appendToListFromValues(yamlContent, "volumes:", ".Values.manager.extraVolumes")
+}
+
+// appendToListFromValues injects a values reference into a YAML list field.
+// Replaces "key: []" with a conditional template; appends to "key:" with existing items.
+func appendToListFromValues(yamlContent string, keyColon string, valuesPath string) string {
+	if !strings.Contains(yamlContent, keyColon) {
+		return yamlContent
+	}
+	if strings.Contains(yamlContent, valuesPath) {
+		return yamlContent
+	}
+
+	lines := strings.Split(yamlContent, "\n")
+	keyEmpty := keyColon + " []"
+
+	for i := range lines {
+		trimmed := strings.TrimSpace(lines[i])
+		indentStr, indentLen := LeadingWhitespace(lines[i])
+		childIndent := indentStr + "  "
+		childIndentWidth := strconv.Itoa(len(childIndent))
+
+		if trimmed == keyEmpty {
+			block := []string{
+				indentStr + keyColon,
+				childIndent + "{{- if " + valuesPath + " }}",
+				childIndent + "{{- toYaml " + valuesPath + " | nindent " + childIndentWidth + " }}",
+				childIndent + "{{- else }}",
+				childIndent + "[]",
+				childIndent + "{{- end }}",
+			}
+			newLines := append([]string{}, lines[:i]...)
+			newLines = append(newLines, block...)
+			newLines = append(newLines, lines[i+1:]...)
+			return strings.Join(newLines, "\n")
+		}
+
+		if trimmed != keyColon {
+			continue
+		}
+
+		end := i + 1
+		for ; end < len(lines); end++ {
+			tLine := strings.TrimSpace(lines[end])
+			if tLine == "" {
+				break
+			}
+			lineIndent := len(lines[end]) - len(strings.TrimLeft(lines[end], " \t"))
+			if lineIndent <= indentLen {
+				break
+			}
+		}
+
+		block := []string{
+			childIndent + "{{- if " + valuesPath + " }}",
+			childIndent + "{{- toYaml " + valuesPath + " | nindent " + childIndentWidth + " }}",
+			childIndent + "{{- end }}",
+		}
+		newLines := append([]string{}, lines[:end]...)
+		newLines = append(newLines, block...)
+		newLines = append(newLines, lines[end:]...)
+		return strings.Join(newLines, "\n")
+	}
+	return yamlContent
+}
+
+// templateImagePullSecrets injects imagePullSecrets; always emits the block so users can enable it in values.yaml.
+func templateImagePullSecrets(yamlContent string) string {
+	lines := strings.Split(yamlContent, "\n")
+
+	if strings.Contains(yamlContent, "imagePullSecrets:") {
+		for i := range lines {
+			if !strings.HasPrefix(strings.TrimSpace(lines[i]), "imagePullSecrets:") {
+				continue
+			}
+
+			if i+1 < len(lines) && strings.Contains(lines[i+1], ".Values.manager.imagePullSecrets") {
+				return yamlContent
+			}
+
+			indentStr, indentLen := LeadingWhitespace(lines[i])
+			end := i + 1
+			for ; end < len(lines); end++ {
+				trimmed := strings.TrimSpace(lines[end])
+				if trimmed == "" {
+					break
+				}
+				lineIndent := len(lines[end]) - len(strings.TrimLeft(lines[end], " \t"))
+				if lineIndent < indentLen {
+					break
+				}
+				if lineIndent == indentLen && !strings.HasPrefix(trimmed, "-") {
+					break
+				}
+			}
+
+			childIndent := indentStr + "  "
+			childIndentWidth := strconv.Itoa(len(childIndent))
+
+			block := []string{
+				indentStr + "{{- with .Values.manager.imagePullSecrets }}",
+				indentStr + "imagePullSecrets:",
+				childIndent + "{{- toYaml . | nindent " + childIndentWidth + " }}",
+				indentStr + "{{- end }}",
+			}
+
+			newLines := append([]string{}, lines[:i]...)
+			newLines = append(newLines, block...)
+			newLines = append(newLines, lines[end:]...)
+			return strings.Join(newLines, "\n")
+		}
+	}
+
+	var insertAt int
+	foundTemplate := false
+	for i := range lines {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == common.YamlKeyTemplate {
+			foundTemplate = true
+			continue
+		}
+		if foundTemplate && trimmed == common.YamlKeySpec {
+			insertAt = i + 1
+			break
+		}
+	}
+
+	if insertAt == 0 || insertAt >= len(lines) {
+		return yamlContent
+	}
+
+	_, indentLen := LeadingWhitespace(lines[insertAt])
+	indentStr := strings.Repeat(" ", indentLen)
+	childIndent := indentStr + "  "
+	childIndentWidth := strconv.Itoa(len(childIndent))
+
+	block := []string{
+		indentStr + "{{- with .Values.manager.imagePullSecrets }}",
+		indentStr + "imagePullSecrets:",
+		childIndent + "{{- toYaml . | nindent " + childIndentWidth + " }}",
+		indentStr + "{{- end }}",
+	}
+
+	newLines := append([]string{}, lines[:insertAt]...)
+	newLines = append(newLines, block...)
+	newLines = append(newLines, lines[insertAt:]...)
+	return strings.Join(newLines, "\n")
+}
+
+func templatePodSecurityContext(yamlContent string) string {
+	if !strings.Contains(yamlContent, "securityContext:") {
+		return yamlContent
+	}
+
+	lines := strings.Split(yamlContent, "\n")
+	for i := range lines {
+		if strings.TrimSpace(lines[i]) != "securityContext:" {
+			continue
+		}
+
+		indentStr, indentLen := LeadingWhitespace(lines[i])
+		end := i + 1
+		for ; end < len(lines); end++ {
+			trimmed := strings.TrimSpace(lines[end])
+			if trimmed == "" {
+				break
+			}
+			lineIndent := len(lines[end]) - len(strings.TrimLeft(lines[end], " \t"))
+			if lineIndent <= indentLen {
+				break
+			}
+		}
+
+		if end >= len(lines) {
+			break
+		}
+
+		if !strings.HasPrefix(strings.TrimSpace(lines[end]), "serviceAccountName:") {
+			continue
+		}
+
+		if i+1 < len(lines) && strings.Contains(lines[i+1], ".Values.manager.podSecurityContext") {
+			return yamlContent
+		}
+
+		childIndent := indentStr + "  "
+		childIndentWidth := strconv.Itoa(len(childIndent))
+
+		block := []string{
+			indentStr + "securityContext:",
+			childIndent + "{{- if .Values.manager.podSecurityContext }}",
+			childIndent + "{{- toYaml .Values.manager.podSecurityContext | nindent " + childIndentWidth + " }}",
+			childIndent + "{{- else }}",
+			childIndent + "{}",
+			childIndent + "{{- end }}",
+		}
+
+		newLines := append([]string{}, lines[:i]...)
+		newLines = append(newLines, block...)
+		newLines = append(newLines, lines[end:]...)
+		return strings.Join(newLines, "\n")
+	}
+
+	return yamlContent
+}
+
+func templateContainerSecurityContext(yamlContent string) string {
+	if !isManagerContainerPresent(yamlContent) || !strings.Contains(yamlContent, "securityContext:") {
+		return yamlContent
+	}
+
+	rangeStart, rangeEnd := FindManagerContainerRange(yamlContent)
+
+	lines := strings.Split(yamlContent, "\n")
+	for i := range lines {
+		if rangeStart >= 0 && (i < rangeStart || i > rangeEnd) {
+			continue
+		}
+		if strings.TrimSpace(lines[i]) != "securityContext:" {
+			continue
+		}
+
+		indentStr, indentLen := LeadingWhitespace(lines[i])
+		end := i + 1
+		for ; end < len(lines); end++ {
+			trimmed := strings.TrimSpace(lines[end])
+			if trimmed == "" {
+				break
+			}
+			lineIndent := len(lines[end]) - len(strings.TrimLeft(lines[end], " \t"))
+			if lineIndent <= indentLen {
+				break
+			}
+		}
+
+		if end >= len(lines) {
+			break
+		}
+
+		if strings.HasPrefix(strings.TrimSpace(lines[end]), "serviceAccountName:") {
+			continue
+		}
+
+		lookAheadEnd := min(end+5, len(lines))
+		joined := strings.Join(lines[i:lookAheadEnd], "\n")
+		if strings.Contains(joined, ".Values.manager.securityContext") {
+			return yamlContent
+		}
+
+		childIndent := indentStr + "  "
+		childIndentWidth := strconv.Itoa(len(childIndent))
+
+		block := []string{
+			indentStr + "securityContext:",
+			childIndent + "{{- if .Values.manager.securityContext }}",
+			childIndent + "{{- toYaml .Values.manager.securityContext | nindent " + childIndentWidth + " }}",
+			childIndent + "{{- else }}",
+			childIndent + "{}",
+			childIndent + "{{- end }}",
+		}
+
+		newLines := append([]string{}, lines[:i]...)
+		newLines = append(newLines, block...)
+		newLines = append(newLines, lines[end:]...)
+		return strings.Join(newLines, "\n")
+	}
+
+	return yamlContent
+}
+
+func templateControllerManagerArgs(yamlContent string) string {
+	if !isManagerContainerPresent(yamlContent) {
+		return yamlContent
+	}
+
+	rangeStart, rangeEnd := FindManagerContainerRange(yamlContent)
+
+	argsPattern := regexp.MustCompile(`(?m)([ \t]+)args:\n((?:[ \t]+-.*\n)+)`)
+	loc := argsPattern.FindStringSubmatchIndex(yamlContent)
+	if loc == nil {
+		return yamlContent
+	}
+
+	if rangeStart >= 0 {
+		matchLine := strings.Count(yamlContent[:loc[0]], "\n")
+		if matchLine < rangeStart || matchLine > rangeEnd {
+			return yamlContent
+		}
+	}
+
+	match := yamlContent[loc[0]:loc[1]]
+	if strings.Contains(match, ".Values.manager.args") {
+		return yamlContent
+	}
+
+	indent := yamlContent[loc[2]:loc[3]]
+	itemsBlock := yamlContent[loc[4]:loc[5]]
+
+	itemIndent := indent + "  "
+	lines := strings.Split(itemsBlock, "\n")
+	var (
+		metricsLine    string
+		metricsIndent  string
+		healthLine     string
+		webhookLine    string
+		preservedLines []string
+	)
+
+	for _, rawLine := range lines {
+		line := strings.TrimRight(rawLine, "\r")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+
+		if itemIndent == indent+"  " {
+			if idx := strings.Index(line, "-"); idx > 0 {
+				itemIndent = line[:idx]
+			}
+		}
+
+		switch {
+		case strings.Contains(trimmed, "--metrics-bind-address"):
+			metricsLine = line
+			if idx := strings.Index(line, "-"); idx > 0 {
+				metricsIndent = line[:idx]
+			}
+		case strings.Contains(trimmed, "--health-probe-bind-address"):
+			healthLine = line
+		case strings.Contains(trimmed, "--webhook-port"):
+			webhookLine = line
+		case strings.Contains(trimmed, "--webhook-cert-path"),
+			strings.Contains(trimmed, "--metrics-cert-path"):
+			preservedLines = append(preservedLines, line)
+		default:
+			// Remaining args will be handled through values.yaml
+		}
+	}
+
+	var builder strings.Builder
+	builder.WriteString(indent)
+	builder.WriteString("args:\n")
+
+	if metricsLine != "" {
+		if metricsIndent == "" {
+			metricsIndent = itemIndent
+		}
+		builder.WriteString(metricsIndent)
+		builder.WriteString("{{- if .Values.metrics.enabled }}\n")
+		builder.WriteString(metricsLine)
+		builder.WriteString("\n")
+		builder.WriteString(metricsIndent)
+		builder.WriteString("{{- if not .Values.metrics.secure }}\n")
+		builder.WriteString(metricsIndent)
+		builder.WriteString("- --metrics-secure=false\n")
+		builder.WriteString(metricsIndent)
+		builder.WriteString("{{- end }}\n")
+		builder.WriteString(metricsIndent)
+		builder.WriteString("{{- else }}\n")
+		builder.WriteString(metricsIndent)
+		builder.WriteString("# Bind to :0 to disable the controller-runtime managed metrics server\n")
+		builder.WriteString(metricsIndent)
+		builder.WriteString("- --metrics-bind-address=0\n")
+		builder.WriteString(metricsIndent)
+		builder.WriteString("{{- end }}\n")
+	}
+	if healthLine != "" {
+		builder.WriteString(healthLine)
+		builder.WriteString("\n")
+	}
+	if webhookLine != "" {
+		builder.WriteString(itemIndent)
+		builder.WriteString("{{- if .Values.webhook.enabled }}\n")
+		builder.WriteString(webhookLine)
+		builder.WriteString("\n")
+		builder.WriteString(itemIndent)
+		builder.WriteString("{{- else }}\n")
+		builder.WriteString(itemIndent)
+		builder.WriteString("# Set -1 to disable the webhook server\n")
+		builder.WriteString(itemIndent)
+		builder.WriteString("- --webhook-port=-1\n")
+		builder.WriteString(itemIndent)
+		builder.WriteString("{{- end }}\n")
+	}
+
+	builder.WriteString(itemIndent)
+	builder.WriteString("{{- range .Values.manager.args }}\n")
+	builder.WriteString(itemIndent)
+	builder.WriteString("- {{ tpl . $ }}\n")
+	builder.WriteString(itemIndent)
+	builder.WriteString("{{- end }}\n")
+
+	for _, line := range preservedLines {
+		builder.WriteString(line)
+		builder.WriteString("\n")
+	}
+
+	newBlock := strings.TrimRight(builder.String(), "\n") + "\n"
+
+	return yamlContent[:loc[0]] + newBlock + yamlContent[loc[1]:]
+}
+
+func templateImageReference(yamlContent string) string {
+	if !isManagerContainerPresent(yamlContent) {
+		return yamlContent
+	}
+
+	rangeStart, rangeEnd := FindManagerContainerRange(yamlContent)
+
+	lines := strings.Split(yamlContent, "\n")
+	for i := 0; i < len(lines); i++ {
+		if rangeStart >= 0 && (i < rangeStart || i > rangeEnd) {
+			continue
+		}
+		trimmed := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(trimmed, "image:") {
+			continue
+		}
+
+		if strings.Contains(lines[i], ".Values.manager.image.repository") {
+			return yamlContent
+		}
+
+		indentStr, indentLen := LeadingWhitespace(lines[i])
+
+		end := i + 1
+		for ; end < len(lines); end++ {
+			nextTrimmed := strings.TrimSpace(lines[end])
+			if nextTrimmed == "" {
+				break
+			}
+			lineIndent := len(lines[end]) - len(strings.TrimLeft(lines[end], " \t"))
+			if lineIndent <= indentLen {
+				break
+			}
+			if lineIndent == indentLen+2 && strings.HasSuffix(nextTrimmed, ":") {
+				if strings.Contains(nextTrimmed, "imagePullPolicy") {
+					continue
+				}
+				break
+			}
+		}
+
+		blockLines := lines[i+1 : end]
+		filtered := make([]string, 0, len(blockLines))
+		for _, line := range blockLines {
+			if strings.Contains(strings.TrimSpace(line), "imagePullPolicy") {
+				continue
+			}
+			filtered = append(filtered, line)
+		}
+		lines = append(lines[:i+1], append(filtered, lines[end:]...)...)
+		end = i + 1 + len(filtered)
+
+		imageLine := indentStr + "image: \"{{ .Values.manager.image.repository | default \"controller\" }}" +
+			"{{- if not (contains \"@\" (.Values.manager.image.repository | default \"controller\")) }}" +
+			":{{ .Values.manager.image.tag | default .Chart.AppVersion }}{{- end }}\""
+		pullPolicyLineStart := indentStr + "{{- with .Values.manager.image.pullPolicy }}"
+		pullPolicyLine := indentStr + "imagePullPolicy: {{ . }}"
+		pullPolicyLineEnd := indentStr + "{{- end }}"
+
+		remainder := lines[end:]
+		if len(remainder) > 0 && strings.HasPrefix(strings.TrimSpace(remainder[0]), "imagePullPolicy:") {
+			remainder = remainder[1:]
+		}
+
+		newLines := append([]string{}, lines[:i]...)
+		newLines = append(newLines, imageLine, pullPolicyLineStart, pullPolicyLine, pullPolicyLineEnd)
+		newLines = append(newLines, remainder...)
+		return strings.Join(newLines, "\n")
+	}
+
+	return yamlContent
+}
+
+func templateBasicWithStatement(
+	yamlContent string,
+	key string,
+	parentKey string,
+	valuePath string,
+) string {
+	if strings.Contains(yamlContent, valuePath) {
+		return yamlContent
+	}
+
+	lines := strings.Split(yamlContent, "\n")
+	yamlKey := fmt.Sprintf("%s:", key)
+
+	var start, end int
+	var indentLen int
+	if !strings.Contains(yamlContent, yamlKey) {
+		pKeyParts := strings.Split(parentKey, ".")
+		pKeyIdx := 0
+		pKeyInit := false
+		currIndent := 0
+		for i := range len(lines) {
+			_, lineIndent := LeadingWhitespace(lines[i])
+			if pKeyInit && lineIndent <= currIndent {
+				return yamlContent
+			}
+			if !strings.HasPrefix(strings.TrimSpace(lines[i]), pKeyParts[pKeyIdx]) {
+				continue
+			}
+
+			pKeyIdx++
+			pKeyInit = true
+			if pKeyIdx >= len(pKeyParts) {
+				start = i + 1
+				end = start
+				break
+			}
+		}
+		_, indentLen = LeadingWhitespace(lines[start])
+	} else {
+		for i := range len(lines) {
+			if !strings.HasPrefix(strings.TrimSpace(lines[i]), yamlKey) {
+				continue
+			}
+			start = i
+			end = i + 1
+			trimmed := strings.TrimSpace(lines[i])
+			if len(trimmed) == len(yamlKey) {
+				_, indentLenSearch := LeadingWhitespace(lines[i])
+				end = len(lines)
+				for j := i + 1; j < len(lines); j++ {
+					trimmedJ := strings.TrimSpace(lines[j])
+					_, indentLenLine := LeadingWhitespace(lines[j])
+					if indentLenLine < indentLenSearch {
+						end = j
+						break
+					}
+					if indentLenLine == indentLenSearch && !strings.HasPrefix(trimmedJ, "- ") {
+						end = j
+						break
+					}
+				}
+			}
+			break
+		}
+		_, indentLen = LeadingWhitespace(lines[start])
+	}
+
+	indentStr := strings.Repeat(" ", indentLen)
+
+	var builder strings.Builder
+	builder.WriteString(indentStr)
+	builder.WriteString("{{- with ")
+	builder.WriteString(valuePath)
+	builder.WriteString(" }}\n")
+	builder.WriteString(indentStr)
+	builder.WriteString(yamlKey)
+	builder.WriteString(" {{ toYaml . | nindent ")
+	builder.WriteString(strconv.Itoa(indentLen + 4))
+	builder.WriteString(" }}\n")
+	builder.WriteString(indentStr)
+	builder.WriteString("{{- end }}\n")
+
+	newBlock := strings.TrimRight(builder.String(), "\n")
+
+	newLines := append([]string{}, lines[:start]...)
+	newLines = append(newLines, strings.Split(newBlock, "\n")...)
+	newLines = append(newLines, lines[end:]...)
+	return strings.Join(newLines, "\n")
+}
+
+func templatePriorityClassName(yamlContent string) string {
+	if strings.Contains(yamlContent, ".Values.manager.priorityClassName") {
+		return yamlContent
+	}
+
+	lines := strings.Split(yamlContent, "\n")
+
+	if strings.Contains(yamlContent, "priorityClassName:") {
+		pattern := regexp.MustCompile(`(?m)^(\s*)priorityClassName:\s*"?([^"\n]*)"?\s*$`)
+		yamlContent = pattern.ReplaceAllString(yamlContent,
+			"${1}{{- with .Values.manager.priorityClassName }}\n"+
+				"${1}priorityClassName: {{ . | quote }}\n"+
+				"${1}{{- end }}")
+		return yamlContent
+	}
+
+	var insertAt int
+	foundTemplate := false
+	for i := range lines {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == common.YamlKeyTemplate {
+			foundTemplate = true
+			continue
+		}
+		if foundTemplate && trimmed == common.YamlKeySpec {
+			insertAt = i + 1
+			break
+		}
+	}
+
+	if insertAt == 0 || insertAt >= len(lines) {
+		return yamlContent
+	}
+
+	_, indentLen := LeadingWhitespace(lines[insertAt])
+	indentStr := strings.Repeat(" ", indentLen)
+
+	block := []string{
+		indentStr + "{{- with .Values.manager.priorityClassName }}",
+		indentStr + "priorityClassName: {{ . | quote }}",
+		indentStr + "{{- end }}",
+	}
+
+	newLines := append([]string{}, lines[:insertAt]...)
+	newLines = append(newLines, block...)
+	newLines = append(newLines, lines[insertAt:]...)
+	return strings.Join(newLines, "\n")
+}
+
+// templateTerminationGracePeriodSeconds injects terminationGracePeriodSeconds; uses hasKey to allow 0 values.
+func templateTerminationGracePeriodSeconds(yamlContent string) string {
+	if strings.Contains(yamlContent, ".Values.manager.terminationGracePeriodSeconds") {
+		return yamlContent
+	}
+
+	lines := strings.Split(yamlContent, "\n")
+
+	if strings.Contains(yamlContent, "terminationGracePeriodSeconds:") {
+		pattern := regexp.MustCompile(`(?m)^(\s*)terminationGracePeriodSeconds:\s*\d+\s*$`)
+		yamlContent = pattern.ReplaceAllString(yamlContent,
+			"${1}{{- if and (hasKey .Values.manager \"terminationGracePeriodSeconds\") "+
+				"(ne .Values.manager.terminationGracePeriodSeconds nil) }}\n"+
+				"${1}terminationGracePeriodSeconds: {{ .Values.manager.terminationGracePeriodSeconds }}\n"+
+				"${1}{{- end }}")
+		return yamlContent
+	}
+
+	var insertAt int
+	for i := range lines {
+		trimmed := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(trimmed, "serviceAccountName:") {
+			insertAt = i + 1
+			break
+		}
+	}
+
+	if insertAt == 0 || insertAt >= len(lines) {
+		return yamlContent
+	}
+
+	_, indentLen := LeadingWhitespace(lines[insertAt-1])
+	indentStr := strings.Repeat(" ", indentLen)
+
+	block := []string{
+		indentStr + "{{- if and (hasKey .Values.manager \"terminationGracePeriodSeconds\") " +
+			"(ne .Values.manager.terminationGracePeriodSeconds nil) }}",
+		indentStr + "terminationGracePeriodSeconds: {{ .Values.manager.terminationGracePeriodSeconds }}",
+		indentStr + "{{- end }}",
+	}
+
+	newLines := append([]string{}, lines[:insertAt]...)
+	newLines = append(newLines, block...)
+	newLines = append(newLines, lines[insertAt:]...)
+	return strings.Join(newLines, "\n")
+}
+
+func handleDeploymentAnnotations(
+	state *customFieldsState, result []string, line, trimmed, indent string, indentLen int,
+) []string {
+	if state.position == positionDeploymentMetadata &&
+		state.currentBlock == blockNone &&
+		(trimmed == common.YamlKeyAnnotations || strings.HasPrefix(trimmed, common.YamlKeyAnnotations)) {
+		state.hasDeploymentAnnotations = true
+		state.currentBlock = blockDeploymentAnnotations
+		state.currentBlockIndent = indentLen
+		return handleFlowStyleAnnotations(result, line, indent)
+	}
+
+	if shouldInjectDeploymentAnnotations(state, trimmed, indentLen) {
+		result = result[:len(result)-1]
+
+		existingKeys := extractKeysFromLines(result)
+		parentIndent := strings.Repeat(" ", state.currentBlockIndent)
+		childIndent := detectChildIndent(result, parentIndent)
+
+		if len(existingKeys) == 0 {
+			result = result[:len(result)-1]
+			childIndentWidth := strconv.Itoa(len(childIndent))
+			result = append(result,
+				parentIndent+"{{- if .Values.manager.annotations }}",
+				parentIndent+"annotations:",
+				childIndent+"{{- toYaml .Values.manager.annotations | nindent "+childIndentWidth+" }}",
+				parentIndent+"{{- end }}",
+			)
+		} else {
+			result = injectDeploymentAnnotations(result, childIndent)
+		}
+
+		result = append(result, line)
+		state.addedAnnotationsToDeployment = true
+		state.currentBlock = blockNone
+	}
+
+	return result
+}
+
+func handlePodAnnotations(
+	state *customFieldsState, result []string, line, trimmed, indent string, indentLen int,
+) []string {
+	if state.position == positionPodMetadata &&
+		state.currentBlock == blockNone &&
+		(trimmed == common.YamlKeyAnnotations || strings.HasPrefix(trimmed, common.YamlKeyAnnotations)) {
+		state.currentBlock = blockPodAnnotations
+		state.currentBlockIndent = indentLen
+		return handleFlowStyleAnnotations(result, line, indent)
+	}
+
+	if shouldInjectPodAnnotations(state, trimmed, indentLen) {
+		result = result[:len(result)-1]
+
+		existingKeys := extractKeysFromLines(result)
+		parentIndent := strings.Repeat(" ", state.currentBlockIndent)
+		childIndent := detectChildIndent(result, parentIndent)
+
+		if len(existingKeys) == 0 {
+			result = result[:len(result)-1]
+			childIndentWidth := strconv.Itoa(len(childIndent))
+			result = append(result,
+				parentIndent+"{{- with .Values.manager.pod }}",
+				parentIndent+"{{- with .annotations }}",
+				parentIndent+"annotations:",
+				childIndent+"{{- toYaml . | nindent "+childIndentWidth+" }}",
+				parentIndent+"{{- end }}",
+				parentIndent+"{{- end }}",
+			)
+		} else {
+			result = addPodAnnotations(result, childIndent)
+		}
+
+		result = append(result, line)
+		state.addedPodAnnotations = true
+		state.currentBlock = blockNone
+	}
+
+	if state.position == positionPodMetadata && !state.addedPodAnnotations && trimmed == common.YamlKeyLabels {
+		result = result[:len(result)-1]
+		result = append(result, indent+"{{- with .Values.manager.pod }}")
+		result = append(result, indent+"{{- with .annotations }}")
+		result = append(result, indent+"annotations:")
+		result = addPodAnnotations(result, indent+"  ")
+		result = append(result, indent+"{{- end }}")
+		result = append(result, indent+"{{- end }}")
+		result = append(result, indent+common.YamlKeyLabels)
+		state.addedPodAnnotations = true
+	}
+
+	return result
+}
+
+func shouldInjectDeploymentAnnotations(
+	state *customFieldsState, trimmed string, indentLen int,
+) bool {
+	return (state.position == positionDeploymentMetadata || state.position == positionAfterDeploymentMetadata) &&
+		state.currentBlock == blockDeploymentAnnotations &&
+		!state.addedAnnotationsToDeployment &&
+		indentLen <= state.currentBlockIndent &&
+		trimmed != "" &&
+		trimmed != common.YamlKeyAnnotations &&
+		!strings.HasPrefix(trimmed, common.YamlKeyAnnotations+" {")
+}
+
+func shouldInjectPodAnnotations(state *customFieldsState, trimmed string, indentLen int) bool {
+	return (state.position == positionPodMetadata || state.position == positionAfterDeploymentMetadata) &&
+		state.currentBlock == blockPodAnnotations &&
+		!state.addedPodAnnotations &&
+		indentLen <= state.currentBlockIndent &&
+		trimmed != "" &&
+		trimmed != common.YamlKeyAnnotations &&
+		!strings.HasPrefix(trimmed, common.YamlKeyAnnotations+" {")
+}
+
+func handleDeploymentLabels(
+	state *customFieldsState, result []string, line, trimmed string, indentLen int,
+) []string {
+	if state.position == positionDeploymentMetadata &&
+		state.currentBlock == blockNone &&
+		trimmed == common.YamlKeyLabels {
+		state.currentBlock = blockDeploymentLabels
+		state.currentBlockIndent = indentLen
+		return result
+	}
+
+	if shouldInjectDeploymentLabels(state, trimmed, indentLen) {
+		result = result[:len(result)-1]
+		parentIndent := strings.Repeat(" ", state.currentBlockIndent)
+		childIndent := detectChildIndent(result, parentIndent)
+		result = injectDeploymentLabels(result, childIndent)
+		result = append(result, line)
+		state.addedLabelsToDeployment = true
+		state.currentBlock = blockNone
+	}
+
+	return result
+}
+
+// handlePodLabels handles injection of custom Pod template labels.
+func handlePodLabels(
+	state *customFieldsState, result []string, line, trimmed string, indentLen int,
+) []string {
+	if state.position == positionPodMetadata &&
+		state.currentBlock == blockNone &&
+		trimmed == common.YamlKeyLabels {
+		state.currentBlock = blockPodLabels
+		state.currentBlockIndent = indentLen
+		return result
+	}
+
+	if shouldInjectPodLabels(state, trimmed, indentLen) {
+		result = result[:len(result)-1]
+		parentIndent := strings.Repeat(" ", state.currentBlockIndent)
+		childIndent := detectChildIndent(result, parentIndent)
+		result = injectPodLabels(result, childIndent)
+		result = append(result, line)
+		state.addedPodLabels = true
+		state.currentBlock = blockNone
+	}
+
+	return result
+}
+
+// shouldInjectDeploymentLabels checks if we should inject Deployment labels.
+func shouldInjectDeploymentLabels(
+	state *customFieldsState, trimmed string, indentLen int,
+) bool {
+	return (state.position == positionDeploymentMetadata || state.position == positionAfterDeploymentMetadata) &&
+		state.currentBlock == blockDeploymentLabels &&
+		!state.addedLabelsToDeployment &&
+		indentLen <= state.currentBlockIndent &&
+		trimmed != "" &&
+		trimmed != common.YamlKeyLabels
+}
+
+// shouldInjectPodLabels checks if we should inject Pod labels.
+func shouldInjectPodLabels(
+	state *customFieldsState, trimmed string, indentLen int,
+) bool {
+	return (state.position == positionPodMetadata || state.position == positionAfterDeploymentMetadata) &&
+		state.currentBlock == blockPodLabels &&
+		!state.addedPodLabels &&
+		indentLen <= state.currentBlockIndent &&
+		trimmed != "" &&
+		trimmed != common.YamlKeyLabels
+}
+
+func injectDeploymentLabels(result []string, childIndent string) []string {
+	existingKeys := extractKeysFromLines(result)
+	return appendHelmMapBlock(result, childIndent, ".Values.manager.labels", existingKeys)
+}
+
+func injectPodLabels(result []string, childIndent string) []string {
+	existingKeys := extractKeysFromLines(result)
+	return appendNestedHelmMapBlock(result, childIndent, ".Values.manager.pod", ".labels", existingKeys)
+}
+
+func injectDeploymentAnnotations(result []string, indent string) []string {
+	existingKeys := extractKeysFromLines(result)
+	return appendHelmMapBlock(result, indent, ".Values.manager.annotations", existingKeys)
+}
+
+func addPodAnnotations(result []string, indent string) []string {
+	existingKeys := extractKeysFromLines(result)
+	return appendNestedHelmMapBlock(result, indent, ".Values.manager.pod", ".annotations", existingKeys)
+}
+
+func handleFlowStyleAnnotations(
+	result []string, line string, indent string,
+) []string {
+	trimmed := strings.TrimSpace(line)
+
+	// Detect flow-style annotations: annotations:{} or annotations: {}
+	flowPattern := regexp.MustCompile(`annotations:\s*\{`)
+	if !flowPattern.MatchString(trimmed) {
+		return result
+	}
+
+	// Extract the flow-style content
+	annotationsStart := strings.Index(line, common.YamlKeyAnnotations)
+	if annotationsStart == -1 {
+		return result
+	}
+
+	// Find the content after "annotations: "
+	contentStart := annotationsStart + len(common.YamlKeyAnnotations)
+	flowContent := strings.TrimSpace(line[contentStart:])
+
+	// Remove the flow-style line we just added
+	result = result[:len(result)-1]
+
+	// Add block-style annotations: key
+	result = append(result, indent+common.YamlKeyAnnotations)
+
+	// Parse and convert flow-style entries to block-style
+	if strings.HasPrefix(flowContent, "{") && strings.HasSuffix(flowContent, "}") {
+		flowContent = strings.TrimPrefix(flowContent, "{")
+		flowContent = strings.TrimSuffix(flowContent, "}")
+		flowContent = strings.TrimSpace(flowContent)
+		if flowContent != "" {
+			entries := strings.Split(flowContent, ",")
+			childIndent := indent + "  "
+			for _, entry := range entries {
+				entry = strings.TrimSpace(entry)
+				if entry != "" {
+					result = append(result, childIndent+entry)
+				}
+			}
+		}
+	}
+
+	return result
+}
+
+// Helper functions for custom labels/annotations injection
+
+// updateMetadataTracking updates the position state as we traverse the YAML structure.
+func updateMetadataTracking(
+	state *customFieldsState, lines []string, i int, trimmed string, indentLen int,
+) {
+	// Track Deployment metadata section
+	if trimmed == common.YamlKeyMetadata && i > 0 {
+		prevLine := strings.TrimSpace(lines[i-1])
+		if strings.HasPrefix(prevLine, "kind: Deployment") || prevLine == "kind: Deployment" {
+			state.position = positionDeploymentMetadata
+			state.deploymentMetadataDepth = indentLen
+		} else if prevLine == common.YamlKeyTemplate {
+			// Track Pod template metadata section
+			state.position = positionPodMetadata
+		}
+	}
+
+	// Exit deployment metadata when we reach spec:
+	if state.position == positionDeploymentMetadata &&
+		trimmed == common.YamlKeySpec && indentLen == state.deploymentMetadataDepth {
+		state.position = positionAfterDeploymentMetadata
+	}
+
+	// Exit pod template metadata when we reach spec: (pod spec)
+	if state.position == positionPodMetadata && trimmed == common.YamlKeySpec {
+		state.position = positionAfterDeploymentMetadata
+	}
+}
+
+// detectChildIndent detects the actual child indentation from existing entries in the current block.
+func detectChildIndent(lines []string, parentIndent string) string {
+	// Scan backwards to find the first child entry with indentation > parent
+	parentIndentLen := len(parentIndent)
+
+	for _, v := range slices.Backward(lines) {
+		line := v
+		trimmed := strings.TrimSpace(line)
+
+		// Skip empty lines and Helm template directives
+		if trimmed == "" || strings.HasPrefix(trimmed, "{{") {
+			continue
+		}
+
+		// Stop at section headers
+		if trimmed == common.YamlKeyLabels || trimmed == common.YamlKeyAnnotations ||
+			trimmed == common.YamlKeyMetadata || trimmed == common.YamlKeySpec || trimmed == common.YamlKeyTemplate {
+			break
+		}
+
+		// Find a line with indentation greater than parent (a child entry)
+		indent, indentLen := LeadingWhitespace(line)
+		if indentLen > parentIndentLen && strings.Contains(line, ":") {
+			return indent
+		}
+	}
+
+	// Default to 2-space indentation (sigs.k8s.io/yaml standard)
+	return parentIndent + "  "
+}
+
+// MakeContainerArgsConditional makes certificate path args conditional.
+func MakeContainerArgsConditional(yamlContent string) string {
+	// Make webhook-cert-path arg conditional on certManager.enabled AND webhook.enabled
+	if strings.Contains(yamlContent, "--webhook-cert-path") {
+		// Match only spaces/tabs for indent to avoid consuming the newline
+		webhookArgPattern := regexp.MustCompile(`([ \t]+)-\s*--webhook-cert-path=[^\n]*`)
+		yamlContent = webhookArgPattern.ReplaceAllStringFunc(yamlContent, func(match string) string {
+			indentMatch := regexp.MustCompile(`^(\s+)`).FindStringSubmatch(match)
+			indent := ""
+			if len(indentMatch) > 1 {
+				indent = indentMatch[1]
+			}
+
+			argLine := strings.TrimSpace(match)
+			return fmt.Sprintf("%s{{- if and .Values.certManager.enabled .Values.webhook.enabled }}\n%s%s\n%s{{- end }}",
+				indent, indent, argLine, indent)
+		})
+	}
+
+	// Make metrics-cert-path arg conditional on certManager.enabled AND metrics.enabled AND metrics.secure
+	if strings.Contains(yamlContent, "--metrics-cert-path") {
+		// Match only spaces/tabs for indent to avoid consuming the newline
+		metricsArgPattern := regexp.MustCompile(`([ \t]+)-\s*--metrics-cert-path=[^\n]*`)
+		yamlContent = metricsArgPattern.ReplaceAllStringFunc(yamlContent, func(match string) string {
+			indentMatch := regexp.MustCompile(`^(\s+)`).FindStringSubmatch(match)
+			indent := ""
+			if len(indentMatch) > 1 {
+				indent = indentMatch[1]
+			}
+
+			argLine := strings.TrimSpace(match)
+			return fmt.Sprintf(
+				"%s{{- if and .Values.certManager.enabled .Values.metrics.enabled .Values.metrics.secure }}\n%s%s\n%s{{- end }}",
+				indent, indent, argLine, indent)
+		})
+	}
+
+	return yamlContent
+}
+
+// MakeWebhookVolumesConditional makes webhook volumes conditional on certManager.enabled and webhook.enabled.
+func MakeWebhookVolumesConditional(yamlContent string) string {
+	if strings.Contains(yamlContent, "webhook-certs") && strings.Contains(yamlContent, "secretName: webhook-server-cert") {
+		// Match only spaces/tabs for indent to avoid consuming the newline
+		volumePattern := regexp.MustCompile(`([ \t]+)-\s*name:\s*webhook-certs[\s\S]*?secretName:\s*webhook-server-cert`)
+		yamlContent = volumePattern.ReplaceAllStringFunc(yamlContent, wrapWebhookCertificateBlock)
+	}
+
+	return yamlContent
+}
+
+// MakeWebhookVolumeMountsConditional makes webhook volume mounts conditional
+// on certManager.enabled and webhook.enabled.
+func MakeWebhookVolumeMountsConditional(yamlContent string) string {
+	webhookCertsPath := "/tmp/k8s-webhook-server/serving-certs"
+	if strings.Contains(yamlContent, "webhook-certs") && strings.Contains(yamlContent, webhookCertsPath) {
+		// Match only spaces/tabs for indent to avoid consuming the newline
+		mountPattern := regexp.MustCompile(
+			`([ \t]+)-\s*mountPath:\s*/tmp/k8s-webhook-server/serving-certs[\s\S]*?readOnly:\s*true`)
+		yamlContent = mountPattern.ReplaceAllStringFunc(yamlContent, wrapWebhookCertificateBlock)
+	}
+
+	return yamlContent
+}
+
+// MakeMetricsVolumesConditional wraps metrics volumes with the metrics TLS conditional.
+func MakeMetricsVolumesConditional(yamlContent string) string {
+	if strings.Contains(yamlContent, "metrics-certs") && strings.Contains(yamlContent, "secretName: metrics-server-cert") {
+		// [ \t]+ matches only spaces/tabs so the newline is not consumed by the regexp.
+		pattern := regexp.MustCompile(`([ \t]+)-\s*name:\s*metrics-certs[\s\S]*?secretName:\s*metrics-server-cert`)
+		yamlContent = wrapWithMetricsTLSConditional(pattern, yamlContent)
+	}
+	return yamlContent
+}
+
+// MakeMetricsVolumeMountsConditional wraps metrics volumeMounts with the metrics TLS conditional.
+func MakeMetricsVolumeMountsConditional(yamlContent string) string {
+	metricsCertsPath := "/tmp/k8s-metrics-server/metrics-certs"
+	if strings.Contains(yamlContent, "metrics-certs") && strings.Contains(yamlContent, metricsCertsPath) {
+		// [ \t]+ matches only spaces/tabs so the newline is not consumed by the regexp.
+		pattern := regexp.MustCompile(
+			`([ \t]+)-\s*mountPath:\s*/tmp/k8s-metrics-server/metrics-certs[\s\S]*?readOnly:\s*true`)
+		yamlContent = wrapWithMetricsTLSConditional(pattern, yamlContent)
+	}
+	return yamlContent
+}
+
+func wrapWithMetricsTLSConditional(pattern *regexp.Regexp, yamlContent string) string {
+	const metricsCondition = "{{- if and .Values.certManager.enabled .Values.metrics.enabled .Values.metrics.secure }}"
+	return pattern.ReplaceAllStringFunc(yamlContent, func(match string) string {
+		return wrapBlock(match, metricsCondition)
+	})
+}

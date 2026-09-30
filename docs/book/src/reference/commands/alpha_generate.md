@@ -14,12 +14,19 @@ directory for diff-based inspection and manual integration.
 
 <aside class="warning" role="note">
     <p class="note-title">Deletes files during scaffold regeneration</p>
-When executed in-place, this command deletes all files except `.git` and `PROJECT`.
+When executed in-place, this command deletes all files except `.git`. Any file that is not part of the
+scaffold, including your own code, is removed and only comes back if you restore it yourself.
+
+Two things are carried across. Your [PROJECT][project-config] file is read before the cleanup, so the
+project configuration is preserved and the new scaffold writes it again from that configuration. Expect
+it to change when the layout changes, for example when migrating from `go.kubebuilder.io/v3` to
+`go.kubebuilder.io/v4`. The license header in `hack/boilerplate.go.txt` is preserved the same way and
+reapplied to the regenerated files.
 
 Always back up your project or use version control before running this command.
 </aside>
 
-## When to Use It?
+## When to use it?
 
 You can use `kubebuilder alpha generate` to upgrade your project scaffold when new changes are introduced
 in Kubebuilder. This includes updates to plugins (for example, `go.kubebuilder.io/v3` → `go.kubebuilder.io/v4`)
@@ -50,7 +57,7 @@ or if you prefer to handle changes manually.
 
 </aside>
 
-## How to Use It?
+## How to use it?
 
 ### Upgrade your current project to CLI version installed (i.e. latest scaffold)
 
@@ -58,11 +65,11 @@ or if you prefer to handle changes manually.
 kubebuilder alpha generate
 ```
 
-After running this command, your project will be re-scaffolded in place.
+After running this command, your project is re-scaffolded in place.
 You can then compare the local changes with your main branch to see what was updated,
 and re-apply your custom code on top as needed.
 
-### Generate Scaffold to a New Directory
+### Generate scaffold to a new directory
 
 Use the `--input-dir` and `--output-dir` flags to specify input and output paths.
 
@@ -78,13 +85,13 @@ After running the command, you can inspect the generated scaffold in the specifi
 
 | Flag            | Description                                                                 |
 |------------------|-----------------------------------------------------------------------------|
-| `--input-dir`    | Path to the directory containing the `PROJECT` file. Defaults to CWD. Deletes all files except `.git` and `PROJECT`. |
-| `--output-dir`   | Directory where the new scaffold will be written. If unset, re-scaffolds in-place. |
+| `--input-dir`    | Path to the directory containing the `PROJECT` file. Defaults to CWD.       |
+| `--output-dir`   | Directory where the new scaffold is written. If unset, re-scaffolds in-place in the input directory, which is cleaned first: all files except `.git` are deleted. |
 | `--plugins`      | Plugin keys to use for this generation.                                     |
 | `-h, --help`     | Show help for this command.                                                 |
 
 
-## Further Resources
+## Further resources
 
 - [Video demo on how it works](https://youtu.be/7997RIbx8kw?si=ODYMud5lLycz7osp)
 - [Design proposal documentation](../../../../../designs/helper_to_upgrade_projects_by_rescaffolding.md)

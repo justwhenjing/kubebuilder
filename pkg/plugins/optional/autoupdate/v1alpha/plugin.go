@@ -39,16 +39,7 @@ Under the hood, the workflow runs 'kubebuilder alpha update' using a **3-way mer
 3) **Permissions required** (via the built-in 'GITHUB_TOKEN'):
    - **contents: write** — needed to create and push the update branch.
    - **issues: write** — needed to create the tracking Issue with the PR link.
-   - **models: read** (optional) — only required if using --use-gh-models flag for AI-generated summaries.
-4) **Protect your branches**: Enable **branch protection rules** so automated changes **cannot** be pushed directly. All updates must go through a Pull Request for review.
-
-### Optional: GitHub Models AI Summary
-
-By default, the workflow does NOT use GitHub Models. To enable AI-generated summaries in GitHub issues:
-  - Ensure your repository/organization has permissions to use GitHub Models.
-  - Re-run: kubebuilder edit --plugins="autoupdate/v1-alpha" --use-gh-models
-
-Without this flag, the workflow will still work but won't include AI summaries (avoiding 403 Forbidden errors).`
+4) **Protect your branches**: Enable **branch protection rules** so automated changes **cannot** be pushed directly. All updates must go through a Pull Request for review.`
 
 const pluginName = "autoupdate." + plugins.DefaultNameQualifier
 
@@ -60,15 +51,12 @@ var (
 // Plugin implements the plugin.Full interface
 type Plugin struct {
 	editSubcommand
-	initSubcommand
 }
 
-var _ plugin.Init = Plugin{}
+var _ plugin.Edit = Plugin{}
 
 // PluginConfig defines the structure that will be used to track the data
-type PluginConfig struct {
-	UseGHModels bool `json:"useGHModels,omitempty"`
-}
+type PluginConfig struct{}
 
 // Name returns the name of the plugin
 func (Plugin) Name() string { return pluginName }
@@ -81,9 +69,6 @@ func (Plugin) SupportedProjectVersions() []config.Version { return supportedProj
 
 // GetEditSubcommand will return the subcommand which is responsible for adding and/or edit a autoupdate
 func (p Plugin) GetEditSubcommand() plugin.EditSubcommand { return &p.editSubcommand }
-
-// GetInitSubcommand will return the subcommand which is responsible for init autoupdate plugin
-func (p Plugin) GetInitSubcommand() plugin.InitSubcommand { return &p.initSubcommand }
 
 // Description returns a short description of the plugin
 func (Plugin) Description() string {

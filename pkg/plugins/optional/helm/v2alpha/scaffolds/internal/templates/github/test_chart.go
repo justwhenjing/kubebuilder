@@ -31,6 +31,8 @@ type HelmChartCI struct {
 
 	// Force if true allows overwriting the scaffolded file
 	Force bool
+	// HasWebhooks enables cert-manager installation in the workflow
+	HasWebhooks bool
 }
 
 // SetTemplateDefaults implements machinery.Template
@@ -64,6 +66,8 @@ jobs:
       contents: read
     name: Run on Ubuntu
     runs-on: ubuntu-latest
+    env:
+      IMG: controller:latest
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -90,8 +94,8 @@ jobs:
       - name: Prepare {{ .ProjectName }}
         run: |
           go mod tidy
-          make docker-build IMG=controller:latest
-          kind load docker-image controller:latest
+          make docker-build
+          kind load docker-image $IMG
 
       - name: Install Helm
         run: make install-helm
@@ -99,7 +103,18 @@ jobs:
       - name: Lint Helm Chart
         run: |
           helm lint ./dist/chart
-
+{{ if .HasWebhooks }}
+      - name: Install cert-manager via Helm (wait for readiness)
+        run: |
+          helm repo add jetstack https://charts.jetstack.io
+          helm repo update
+          helm install cert-manager jetstack/cert-manager \
+            --namespace cert-manager \
+            --create-namespace \
+            --set crds.enabled=true \
+            --wait \
+            --timeout 300s
+{{ else }}
 # TODO: Uncomment if cert-manager is enabled
 #      - name: Install cert-manager via Helm (wait for readiness)
 #        run: |
@@ -111,7 +126,7 @@ jobs:
 #            --set crds.enabled=true \
 #            --wait \
 #            --timeout 300s
-
+{{ end }}
 # TODO: Uncomment if Prometheus is enabled
 #      - name: Install Prometheus Operator CRDs
 #        run: |
@@ -121,7 +136,7 @@ jobs:
 
       - name: Deploy manager via Helm
         run: |
-          make helm-deploy IMG={{ .ProjectName }}:v0.1.0
+          make helm-deploy
 
       - name: Check Helm release status
         run: |

@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/kubebuilder/v4/pkg/config/store/yaml"
 	"sigs.k8s.io/kubebuilder/v4/pkg/machinery"
 	"sigs.k8s.io/kubebuilder/v4/pkg/plugin"
+	"sigs.k8s.io/kubebuilder/v4/pkg/plugins/optional/helm/v2alpha/internal/common"
 )
 
 var _ = Describe("editSubcommand", func() {
@@ -73,7 +74,7 @@ version: "3"
 			editCmd.UpdateMetadata(cliMeta, &meta)
 
 			Expect(meta.Description).To(ContainSubstring("Generate a Helm chart"))
-			Expect(meta.Description).To(ContainSubstring("kustomize"))
+			Expect(meta.Description).To(ContainSubstring("Kustomize"))
 			Expect(meta.Examples).NotTo(BeEmpty())
 		})
 	})
@@ -90,7 +91,7 @@ version: "3"
 
 			outputFlag := flagSet.Lookup("output-dir")
 			Expect(outputFlag).NotTo(BeNil())
-			Expect(outputFlag.DefValue).To(Equal(DefaultOutputDir))
+			Expect(outputFlag.DefValue).To(Equal(common.DefaultOutputDir))
 
 			forceFlag := flagSet.Lookup("force")
 			Expect(forceFlag).NotTo(BeNil())
@@ -102,13 +103,6 @@ version: "3"
 			err := editCmd.InjectConfig(cfg)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(editCmd.config).To(Equal(cfg))
-		})
-	})
-
-	Context("hasWebhooksWith", func() {
-		It("should return false for config without webhooks", func() {
-			result := hasWebhooksWith(cfg)
-			Expect(result).To(BeFalse())
 		})
 	})
 
@@ -213,61 +207,6 @@ version: "3"
 		})
 	})
 
-	Context("PostScaffold", func() {
-		BeforeEach(func() {
-			// Create the directory structure
-			err := fs.FS.MkdirAll(".github/workflows", 0o755)
-			Expect(err).NotTo(HaveOccurred())
-		})
-
-		It("should not modify workflow file when no webhooks present", func() {
-			// Create test workflow file
-			workflowContent := `name: Test Chart
-on:
-  push:
-    branches: [main]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-#      - name: Install cert-manager via Helm
-#        run: |
-#          helm repo add jetstack https://charts.jetstack.io
-#          helm repo update
-#          helm install cert-manager jetstack/cert-manager \
-#            --namespace cert-manager --create-namespace --set crds.enabled=true
-#
-#      - name: Wait for cert-manager to be ready
-#        run: |
-#          kubectl wait --namespace cert-manager --for=condition=available \
-#            --timeout=300s deployment/cert-manager
-#          kubectl wait --namespace cert-manager --for=condition=available \
-#            --timeout=300s deployment/cert-manager-cainjector
-#          kubectl wait --namespace cert-manager --for=condition=available \
-#            --timeout=300s deployment/cert-manager-webhook
-`
-			workflowPath := filepath.Join(".github", "workflows", "test-chart.yml")
-			err := afero.WriteFile(fs.FS, workflowPath, []byte(workflowContent), 0o644)
-			Expect(err).NotTo(HaveOccurred())
-
-			err = editCmd.PostScaffold()
-			Expect(err).NotTo(HaveOccurred())
-
-			// Content should remain unchanged
-			content, err := afero.ReadFile(fs.FS, workflowPath)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(string(content)).To(ContainSubstring("#      - name: Install cert-manager via Helm"))
-		})
-
-		It("should handle missing workflow file gracefully", func() {
-			editCmd.config = cfg
-			err := editCmd.PostScaffold()
-			Expect(err).NotTo(HaveOccurred()) // Should not error even if file doesn't exist
-		})
-	})
-
 	Context("addHelmMakefileTargets", func() {
 		var tmpDir string
 
@@ -280,7 +219,7 @@ jobs:
 			err = os.Chdir(tmpDir)
 			Expect(err).NotTo(HaveOccurred())
 
-			editCmd.outputDir = DefaultOutputDir
+			editCmd.outputDir = common.DefaultOutputDir
 		})
 
 		AfterEach(func() {
@@ -370,7 +309,7 @@ install-helm: ## Install the latest version of Helm.
 
 .PHONY: helm-deploy
 helm-deploy: install-helm ## Deploy manager to the K8s cluster via Helm. Specify an image with IMG.
-	$(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART_DIR) \
+	IMG="$(IMG)"; $(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART_DIR) \
 		--namespace $(HELM_NAMESPACE) \
 		--create-namespace \
 		--set manager.image.repository=$${IMG%:*} \
@@ -420,6 +359,64 @@ helm-rollback: ## Rollback to previous Helm release.
 			err := editCmd.addHelmMakefileTargets("test-project-system")
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("makefile not found"))
+		})
+	})
+
+	Context("extractNamespaceFromManifests", func() {
+		var tmpDir string
+
+		BeforeEach(func() {
+			var err error
+			tmpDir, err = os.MkdirTemp("", "helm-edit-test-*")
+			Expect(err).NotTo(HaveOccurred())
+
+			err = os.Chdir(tmpDir)
+			Expect(err).NotTo(HaveOccurred())
+
+			editCmd.config = cfg
+		})
+
+		AfterEach(func() {
+			if tmpDir != "" {
+				_ = os.RemoveAll(tmpDir)
+			}
+		})
+
+		It("should return default namespace when manifests file does not exist", func() {
+			editCmd.manifestsFile = filepath.Join(tmpDir, "nonexistent.yaml")
+			ns := editCmd.extractNamespaceFromManifests()
+			Expect(ns).To(Equal("test-project-system"))
+		})
+
+		It("should return namespace from manager Deployment in valid manifests", func() {
+			content := `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-controller-manager
+  namespace: my-custom-system
+`
+			manifestPath := filepath.Join(tmpDir, "install.yaml")
+			err := os.WriteFile(manifestPath, []byte(content), 0o644)
+			Expect(err).NotTo(HaveOccurred())
+
+			editCmd.manifestsFile = manifestPath
+			ns := editCmd.extractNamespaceFromManifests()
+			Expect(ns).To(Equal("my-custom-system"))
+		})
+
+		It("should return default namespace when manifests are malformed YAML", func() {
+			malformed := `
+: this is not : valid yaml: [
+  broken: {
+`
+			manifestPath := filepath.Join(tmpDir, "install.yaml")
+			err := os.WriteFile(manifestPath, []byte(malformed), 0o644)
+			Expect(err).NotTo(HaveOccurred())
+
+			editCmd.manifestsFile = manifestPath
+
+			ns := editCmd.extractNamespaceFromManifests()
+			Expect(ns).To(Equal("test-project-system"))
 		})
 	})
 })

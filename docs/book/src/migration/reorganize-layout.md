@@ -23,11 +23,21 @@ Always validate changes carefully.
 
 </aside>
 
+<aside class="note" role="note">
+
+<p class="note-title">Building with Podman or Buildah</p>
+
+Podman does not honor the `!**/*.go` re-include in the scaffolded `.dockerignore`.
+If you use Podman, re-include your source directories by name. See the
+[FAQ](../faq.md#when-i-build-the-image-with-podman-or-buildah-the-build-fails-with-cmdmaingo-no-such-file-or-directory-how-to-solve-it) for details.
+
+</aside>
+
 ## Instructions to provide to your AI assistant
 
 Copy and paste these instructions to your AI assistant:
 
-```
+```text
 Reorganize Kubebuilder project files to match new directory layout.
 
 CONTEXT:
@@ -104,10 +114,17 @@ Option 1 - Simplify (recommended):
 
 Ensure .dockerignore has:
     **
-    !**/*.go
-    **/*_test.go
     !go.mod
     !go.sum
+    !**/*.go
+    **/*_test.go
+
+Note: Podman does not honor the !**/*.go re-include
+(https://github.com/containers/buildah/issues/6417). If the project is built
+with Podman, also re-include the source directories by name:
+    !cmd
+    !api
+    !internal
 
 Option 2 - Update explicit paths:
     COPY cmd/ cmd/
@@ -127,7 +144,7 @@ If errors, fix import paths.
 Success: new layout, make build succeeds, make test passes, project functional
 ```
 
-## What This Does
+## What this does
 
 The AI will:
 
@@ -137,7 +154,7 @@ The AI will:
 
 After this step, your project uses the new layout (same code, new locations), making migration much simpler!
 
-## Next Steps
+## Next steps
 
 After AI reorganizes:
 

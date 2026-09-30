@@ -95,14 +95,9 @@ func (sp *Sample) UpdateTutorial() {
 	sp.updateWebhookTests()
 	// 4. update makefile
 	sp.updateMakefile()
-	// 5. generate extra files
-	// Pin google.golang.org/grpc to the patched version (CVE: SNYK-GOLANG-GOOGLEGOLANGORGGRPC-15691172)
-	cmd := exec.Command("go", "get", "google.golang.org/grpc@v1.79.3")
-	_, err := sp.ctx.Run(cmd)
-	hackutils.CheckError("Failed to pin google.golang.org/grpc for cronjob tutorial", err)
 
-	cmd = exec.Command("go", "mod", "tidy")
-	_, err = sp.ctx.Run(cmd)
+	cmd := exec.Command("go", "mod", "tidy")
+	_, err := sp.ctx.Run(cmd)
 	hackutils.CheckError("Failed to run go mod tidy for cronjob tutorial", err)
 
 	cmd = exec.Command("go", "get", "github.com/robfig/cron")
@@ -217,7 +212,10 @@ func (sp *Sample) updateSpec() {
 
 	err = pluginutil.InsertCode(
 		filepath.Join(sp.ctx.Dir, "api/v1/cronjob_types.go"),
-		`SchemeBuilder.Register(&CronJob{}, &CronJobList{})
+		`SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(SchemeGroupVersion, &CronJob{}, &CronJobList{})
+		return nil
+	})
 }`, `
 // +kubebuilder:docs-gen:collapse=Root Object Definitions`)
 	hackutils.CheckError("fixing builder for cronjob_types.go", err)
@@ -251,7 +249,7 @@ func (sp *Sample) updateAPIStuff() {
 
 	err = pluginutil.InsertCode(
 		filepath.Join(sp.ctx.Dir, "api/v1/groupversion_info.go"),
-		`	"sigs.k8s.io/controller-runtime/pkg/scheme"
+		`	"k8s.io/apimachinery/pkg/runtime/schema"
 )`, groupVersionSchema)
 	hackutils.CheckError("fixing groupversion_info.go", err)
 }
@@ -394,13 +392,7 @@ manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and Cust
 func (sp *Sample) updateWebhookTests() {
 	file := filepath.Join(sp.ctx.Dir, "internal/webhook/v1/cronjob_webhook_test.go")
 
-	err := pluginutil.InsertCode(file,
-		`// TODO (user): Add any additional imports if needed`,
-		`
-	"k8s.io/utils/ptr"`)
-	hackutils.CheckError("add import for webhook tests", err)
-
-	err = pluginutil.ReplaceInFile(file,
+	err := pluginutil.ReplaceInFile(file,
 		webhookTestCreateDefaultingFragment,
 		webhookTestCreateDefaultingReplaceFragment)
 	hackutils.CheckError("replace create defaulting test", err)
@@ -486,8 +478,8 @@ Then, we set up the webhook with the manager.
 
 	err = pluginutil.ReplaceInFile(
 		filepath.Join(sp.ctx.Dir, "internal/webhook/v1/cronjob_webhook.go"),
-		`WithDefaulter(&CronJobCustomDefaulter{}).`,
-		`WithDefaulter(&CronJobCustomDefaulter{
+		`WithDefaulter(&CronJobDefaulter{}).`,
+		`WithDefaulter(&CronJobDefaulter{
         DefaultConcurrencyPolicy:      batchv1.AllowConcurrent,
         DefaultSuspend:                false,
         DefaultSuccessfulJobsHistoryLimit: 3,
@@ -521,7 +513,7 @@ Then, we set up the webhook with the manager.
 
 	err = pluginutil.ReplaceInFile(
 		filepath.Join(sp.ctx.Dir, "internal/webhook/v1/cronjob_webhook.go"),
-		`// Default implements webhook.CustomDefaulter so a webhook will be registered for the Kind CronJob.`,
+		`// Default implements admission.Defaulter so a webhook will be registered for the Kind CronJob.`,
 		customInterfaceDefaultInfo)
 	hackutils.CheckError("fixing cronjob_webhook.go by adding validation logic upon object update", err)
 
@@ -542,7 +534,7 @@ func (sp *Sample) updateSuiteTest() {
 	err = pluginutil.InsertCode(
 		filepath.Join(sp.ctx.Dir, "internal/controller/suite_test.go"),
 		`
-	"time"
+	"testing"
 `, `
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -605,9 +597,8 @@ var (
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
 	cancel()
-	Eventually(func() error {
-		return testEnv.Stop()
-	}, time.Minute, time.Second).Should(Succeed())
+	err := testEnv.Stop()
+	Expect(err).NotTo(HaveOccurred())
 })
 `, suiteTestCleanup)
 	hackutils.CheckError("updating suite_test.go to cleanup tests", err)

@@ -37,6 +37,16 @@ import (
 	helmv2alpha "sigs.k8s.io/kubebuilder/v4/pkg/plugins/optional/helm/v2alpha"
 )
 
+const (
+	flagPlugins                  = "--plugins"
+	kubebuilderSubcommandCreate  = "create"
+	kubebuilderSubcommandEdit    = "edit"
+	kubebuilderSubcommandAPI     = "api"
+	pluginGoKubebuilderV4        = "go.kubebuilder.io/v4"
+	pluginHelmKubebuilderV1Alpha = "helm.kubebuilder.io/v1-alpha"
+	pluginHelmKubebuilderV2Alpha = "helm.kubebuilder.io/v2-alpha"
+)
+
 // Generate store the required info for the command
 type Generate struct {
 	InputDir           string
@@ -54,34 +64,65 @@ func (opts *Generate) Generate() error {
 		return fmt.Errorf("error loading project config: %v", err)
 	}
 
-	if opts.OutputDir == "" {
-		cwd, getWdErr := os.Getwd()
-		if getWdErr != nil {
-			return fmt.Errorf("failed to get working directory: %w", getWdErr)
+	// Save existing boilerplate before cleanup so we can restore it
+	var preservedBoilerplate []byte
+	var boilerplateFileExists bool
+	boilerplatePath := filepath.Join(opts.InputDir, "hack", "boilerplate.go.txt")
+	if _, statErr := os.Stat(boilerplatePath); statErr == nil {
+		boilerplateFileExists = true
+		preservedBoilerplate, err = os.ReadFile(boilerplatePath)
+		if err != nil {
+			return fmt.Errorf("failed to read existing boilerplate file %q: %w", boilerplatePath, err)
 		}
-		opts.OutputDir = cwd
-		if _, err = os.Stat(opts.OutputDir); err == nil {
-			slog.Warn("Using current working directory to re-scaffold the project")
+
+		// Warn if boilerplate isn't a valid Go comment block, but don't fail
+		if len(preservedBoilerplate) > 0 {
+			content := strings.TrimSpace(string(preservedBoilerplate))
+			if !strings.HasPrefix(content, "/*") || !strings.HasSuffix(content, "*/") {
+				slog.Warn(
+					"Existing boilerplate file is not a valid Go comment block; preserving it as-is for regeneration",
+					"path", boilerplatePath,
+				)
+			}
+		}
+
+		slog.Info("Preserving existing license header file for regeneration")
+	}
+
+	// Save the customised Grafana config before cleanup for the same reason:
+	// in an in-place run the directory grafanaConfigMigrate reads from is
+	// cleaned first, and by migration time the file on disk is a freshly
+	// scaffolded default rather than the user's customisation.
+	var preservedGrafanaConfig []byte
+	var grafanaConfigExists bool
+	grafanaConfigPath := filepath.Join(opts.InputDir, "grafana", "custom-metrics", "config.yaml")
+	if _, statErr := os.Stat(grafanaConfigPath); statErr == nil {
+		grafanaConfigExists = true
+		preservedGrafanaConfig, err = os.ReadFile(grafanaConfigPath)
+		if err != nil {
+			return fmt.Errorf("failed to read existing Grafana config file %q: %w", grafanaConfigPath, err)
+		}
+		slog.Info("Preserving existing Grafana custom metrics config for regeneration")
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		// Only a missing file means there is nothing to preserve. Any other
+		// error must fail the run here, before the cleanup deletes the config.
+		return fmt.Errorf("failed to check the existing Grafana config file %q: %w", grafanaConfigPath, statErr)
+	}
+
+	inPlace := opts.OutputDir == ""
+	if opts.OutputDir, err = resolveOutputDir(opts.InputDir, opts.OutputDir); err != nil {
+		return err
+	}
+
+	if inPlace {
+		if _, statErr := os.Stat(opts.OutputDir); statErr == nil {
+			slog.Warn("Re-scaffolding the project in place", "dir", opts.OutputDir)
 			slog.Warn("This directory will be cleaned up and all files removed before the re-generation")
 
-			// Ensure we clean the correct directory
+			// Ensure we clean the correct directory without shell interpolation
+			// of --output-dir (paths with metacharacters must not reach sh -c).
 			slog.Info("Cleaning directory", "dir", opts.OutputDir)
-
-			// Use an absolute path to target files directly
-			cleanupCmd := fmt.Sprintf("rm -rf %s/*", opts.OutputDir)
-			err = util.RunCmd("Running cleanup", "sh", "-c", cleanupCmd)
-			if err != nil {
-				slog.Error("Cleanup failed", "error", err)
-				return fmt.Errorf("cleanup failed: %w", err)
-			}
-
-			// Note that we should remove ALL files except the PROJECT file and .git directory
-			cleanupCmd = fmt.Sprintf(
-				`find %q -mindepth 1 -maxdepth 1 ! -name '.git' ! -name 'PROJECT' -exec rm -rf {} +`,
-				opts.OutputDir,
-			)
-			err = util.RunCmd("Running cleanup", "sh", "-c", cleanupCmd)
-			if err != nil {
+			if err = cleanOutputDirPreservingGit(opts.OutputDir); err != nil {
 				slog.Error("Cleanup failed", "error", err)
 				return fmt.Errorf("cleanup failed: %w", err)
 			}
@@ -96,7 +137,29 @@ func (opts *Generate) Generate() error {
 		return fmt.Errorf("error changing working directory %q: %w", opts.OutputDir, err)
 	}
 
-	if err = kubebuilderInit(projectConfig, opts); err != nil {
+	// Create temp file with preserved boilerplate to pass to init
+	var tempLicenseFile string
+	if boilerplateFileExists {
+		tempFile, createErr := os.CreateTemp("", "kubebuilder-license-*.txt")
+		if createErr != nil {
+			return fmt.Errorf("failed to create temporary license file: %w", createErr)
+		}
+		defer func() {
+			_ = os.Remove(tempFile.Name())
+		}()
+
+		if len(preservedBoilerplate) > 0 {
+			if _, writeErr := tempFile.Write(preservedBoilerplate); writeErr != nil {
+				return fmt.Errorf("failed to write temporary license file: %w", writeErr)
+			}
+		}
+		_ = tempFile.Close()
+
+		tempLicenseFile = tempFile.Name()
+		slog.Info("Created temporary license file for init", "path", tempLicenseFile)
+	}
+
+	if err = kubebuilderInit(projectConfig, opts, tempLicenseFile); err != nil {
 		return fmt.Errorf("error initializing project config: %w", err)
 	}
 
@@ -104,7 +167,8 @@ func (opts *Generate) Generate() error {
 		return fmt.Errorf("error creating project config: %w", err)
 	}
 
-	if err = migrateGrafanaPlugin(projectConfig, opts.InputDir, opts.OutputDir); err != nil {
+	if err = migrateGrafanaPlugin(projectConfig, opts.InputDir, opts.OutputDir,
+		preservedGrafanaConfig, grafanaConfigExists); err != nil {
 		return fmt.Errorf("error migrating Grafana plugin: %w", err)
 	}
 
@@ -187,8 +251,8 @@ func changeWorkingDirectory(outputDir string) error {
 }
 
 // Initializes the project with Kubebuilder.
-func kubebuilderInit(s store.Store, opts *Generate) error {
-	args := append([]string{"init"}, getInitArgs(s, opts)...)
+func kubebuilderInit(s store.Store, opts *Generate, tempLicenseFile string) error {
+	args := append([]string{"init"}, getInitArgs(s, opts, tempLicenseFile)...)
 	execPath, err := getExecutablePathFunc()
 	if err != nil {
 		return err
@@ -234,7 +298,7 @@ func kubebuilderCreate(s store.Store) error {
 }
 
 // Migrates the Grafana plugin.
-func migrateGrafanaPlugin(s store.Store, src, des string) error {
+func migrateGrafanaPlugin(s store.Store, src, des string, preservedConfig []byte, preservedConfigExists bool) error {
 	var grafanaPlugin struct{}
 	key := plugin.GetPluginKeyForConfig(s.Config().GetPluginChain(), grafanav1alpha.Plugin{})
 	canonicalKey := plugin.KeyFor(grafanav1alpha.Plugin{})
@@ -277,7 +341,7 @@ func migrateGrafanaPlugin(s store.Store, src, des string) error {
 		return fmt.Errorf("error editing Grafana plugin: %w", err)
 	}
 
-	if err = grafanaConfigMigrate(src, des); err != nil {
+	if err = grafanaConfigMigrate(src, des, preservedConfig, preservedConfigExists); err != nil {
 		return fmt.Errorf("error migrating Grafana config: %w", err)
 	}
 
@@ -324,10 +388,7 @@ func migrateAutoUpdatePlugin(s store.Store) error {
 		return nil
 	}
 
-	args := []string{"edit", "--plugins", plugin.KeyFor(autoupdatev1alpha.Plugin{})}
-	if autoUpdatePlugin.UseGHModels {
-		args = append(args, "--use-gh-models")
-	}
+	args := []string{kubebuilderSubcommandEdit, flagPlugins, plugin.KeyFor(autoupdatev1alpha.Plugin{})}
 	if err = util.RunCmd("kubebuilder edit", "kubebuilder", args...); err != nil {
 		return fmt.Errorf("failed to run edit subcommand for Auto plugin: %w", err)
 	}
@@ -386,7 +447,10 @@ func migrateDeployImagePlugin(s store.Store) error {
 
 // Creates an API with Deploy Image plugin.
 func createAPIWithDeployImage(resourceData deployimagev1alpha1.ResourceData) error {
-	args := append([]string{"create", "api"}, getGVKFlagsFromDeployImage(resourceData)...)
+	args := append(
+		[]string{kubebuilderSubcommandCreate, kubebuilderSubcommandAPI},
+		getGVKFlagsFromDeployImage(resourceData)...,
+	)
 	args = append(args, getDeployImageOptions(resourceData)...)
 	if err := util.RunCmd("kubebuilder create api", "kubebuilder", args...); err != nil {
 		return fmt.Errorf("failed to run kubebuilder create api command: %w", err)
@@ -396,7 +460,7 @@ func createAPIWithDeployImage(resourceData deployimagev1alpha1.ResourceData) err
 }
 
 // Helper function to get Init arguments for Kubebuilder.
-func getInitArgs(s store.Store, opts *Generate) []string {
+func getInitArgs(s store.Store, opts *Generate, tempLicenseFile string) []string {
 	var args []string
 
 	if opts.SkipGoVersionCheck {
@@ -407,10 +471,10 @@ func getInitArgs(s store.Store, opts *Generate) []string {
 
 	// Define outdated plugin versions that need replacement
 	outdatedPlugins := map[string]string{
-		"go.kubebuilder.io/v3":         "go.kubebuilder.io/v4",
-		"go.kubebuilder.io/v3-alpha":   "go.kubebuilder.io/v4",
-		"go.kubebuilder.io/v2":         "go.kubebuilder.io/v4",
-		"helm.kubebuilder.io/v1-alpha": "helm.kubebuilder.io/v2-alpha",
+		"go.kubebuilder.io/v3":       pluginGoKubebuilderV4,
+		"go.kubebuilder.io/v3-alpha": pluginGoKubebuilderV4,
+		"go.kubebuilder.io/v2":       pluginGoKubebuilderV4,
+		pluginHelmKubebuilderV1Alpha: pluginHelmKubebuilderV2Alpha,
 	}
 
 	// Replace outdated plugins and exit after the first replacement
@@ -426,7 +490,7 @@ func getInitArgs(s store.Store, opts *Generate) []string {
 	}
 
 	if len(plugins) > 0 {
-		args = append(args, "--plugins", strings.Join(plugins, ","))
+		args = append(args, flagPlugins, strings.Join(plugins, ","))
 	}
 	if domain := s.Config().GetDomain(); domain != "" {
 		args = append(args, "--domain", domain)
@@ -442,6 +506,13 @@ func getInitArgs(s store.Store, opts *Generate) []string {
 	}
 	if s.Config().IsNamespaced() {
 		args = append(args, "--namespaced")
+	}
+
+	// Use preserved boilerplate if it existed, otherwise --license none
+	if tempLicenseFile != "" {
+		args = append(args, "--license-file", tempLicenseFile)
+	} else {
+		args = append(args, "--license", "none")
 	}
 	return args
 }
@@ -501,7 +572,7 @@ func getDeployImageOptions(resourceData deployimagev1alpha1.ResourceData) []stri
 // Creates an API resource.
 // Controllers are scaffolded separately to support multiple controllers per API.
 func createAPI(res resource.Resource) error {
-	args := append([]string{"create", "api"}, getGVKFlags(res)...)
+	args := append([]string{kubebuilderSubcommandCreate, kubebuilderSubcommandAPI}, getGVKFlags(res)...)
 	args = append(args, getAPIResourceFlags(res)...)
 
 	// Add the external API flags if the resource is external
@@ -542,7 +613,7 @@ func createControllers(res resource.Resource) error {
 
 // Creates a single controller for a resource with a specific name.
 func createControllerWithName(res resource.Resource, controllerName string) error {
-	args := append([]string{"create", "api"}, getGVKFlags(res)...)
+	args := append([]string{kubebuilderSubcommandCreate, kubebuilderSubcommandAPI}, getGVKFlags(res)...)
 
 	// Always set --resource=false since we're only creating the controller
 	args = append(args, "--resource=false")
@@ -582,6 +653,10 @@ func getAPIResourceFlags(res resource.Resource) []string {
 			args = append(args, "--namespaced")
 		} else {
 			args = append(args, "--namespaced=false")
+		}
+		// Add --ssa flag if Server-Side Apply is enabled
+		if res.API.SSA {
+			args = append(args, "--ssa")
 		}
 	}
 
@@ -642,13 +717,54 @@ func getWebhookResourceFlags(res resource.Resource) []string {
 	return args
 }
 
+// resolveOutputDir returns the directory the new scaffold is written to.
+// With --output-dir unset the project is regenerated in place, which means the
+// directory it was read from. Falling back to the working directory here would
+// clean an unrelated tree whenever --input-dir points elsewhere.
+func resolveOutputDir(inputDir, outputDir string) (string, error) {
+	if outputDir != "" {
+		return outputDir, nil
+	}
+	if inputDir != "" {
+		return inputDir, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get working directory: %w", err)
+	}
+	return cwd, nil
+}
+
+// cleanOutputDirPreservingGit removes all top-level entries under outputDir
+// except `.git`, using Go filesystem APIs only.
+// PROJECT must go too: `kubebuilder init` refuses to run when a config file is
+// already present, and it re-creates PROJECT from the config loaded in memory.
+func cleanOutputDirPreservingGit(outputDir string) error {
+	entries, err := os.ReadDir(outputDir)
+	if err != nil {
+		return fmt.Errorf("read output directory %q: %w", outputDir, err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == ".git" {
+			continue
+		}
+		path := filepath.Join(outputDir, name)
+		if removeErr := os.RemoveAll(path); removeErr != nil {
+			return fmt.Errorf("remove %q: %w", path, removeErr)
+		}
+	}
+	return nil
+}
+
 // Copies files from source to destination.
 func copyFile(src, des string) error {
 	bytesRead, err := os.ReadFile(src)
 	if err != nil {
 		return fmt.Errorf("source file path %q does not exist: %w", src, err)
 	}
-	if err = os.WriteFile(des, bytesRead, 0o755); err != nil {
+	// Data files (YAML, manifests) must not be world-executable.
+	if err = os.WriteFile(des, bytesRead, 0o644); err != nil {
 		return fmt.Errorf("failed to write file %q: %w", des, err)
 	}
 
@@ -656,18 +772,32 @@ func copyFile(src, des string) error {
 }
 
 // Migrates Grafana configuration files.
-func grafanaConfigMigrate(src, des string) error {
+// preservedConfig holds the content of <src>/grafana/custom-metrics/config.yaml
+// as it was before the output directory was cleaned, and preservedConfigExists
+// records whether that file was present at all: an existing empty file must be
+// restored as empty, not left as the scaffolded default. When src and des are
+// the same directory (an in-place regeneration), the file on disk at this
+// point is a freshly scaffolded default, so the preserved content is the one
+// to carry forward.
+func grafanaConfigMigrate(src, des string, preservedConfig []byte, preservedConfigExists bool) error {
+	desConfig := fmt.Sprintf("%s/grafana/custom-metrics/config.yaml", des)
+	if preservedConfigExists {
+		if err := os.WriteFile(desConfig, preservedConfig, 0o644); err != nil {
+			return fmt.Errorf("failed to write file %q: %w", desConfig, err)
+		}
+		return nil
+	}
 	grafanaConfig := fmt.Sprintf("%s/grafana/custom-metrics/config.yaml", src)
 	if _, err := os.Stat(grafanaConfig); os.IsNotExist(err) {
 		slog.Info("Grafana config file not found, skipping file migration", "path", grafanaConfig)
 		return nil // Don't fail if config files don't exist
 	}
-	return copyFile(grafanaConfig, fmt.Sprintf("%s/grafana/custom-metrics/config.yaml", des))
+	return copyFile(grafanaConfig, desConfig)
 }
 
 // Edits the project to include the Grafana plugin.
 func kubebuilderGrafanaEdit() error {
-	args := []string{"edit", "--plugins", plugin.KeyFor(grafanav1alpha.Plugin{})}
+	args := []string{kubebuilderSubcommandEdit, flagPlugins, plugin.KeyFor(grafanav1alpha.Plugin{})}
 	if err := util.RunCmd("kubebuilder edit", "kubebuilder", args...); err != nil {
 		return fmt.Errorf("failed to run edit subcommand for Grafana plugin: %w", err)
 	}
@@ -690,7 +820,7 @@ func kubebuilderHelmEditWithConfig(s store.Store) error {
 
 	// Use tracked configuration values
 	pluginKey := plugin.KeyFor(helmv2alpha.Plugin{})
-	args := []string{"edit", "--plugins", pluginKey}
+	args := []string{kubebuilderSubcommandEdit, flagPlugins, pluginKey}
 	if cfg.ManifestsFile != "" {
 		args = append(args, "--manifests", cfg.ManifestsFile)
 	}
@@ -713,7 +843,7 @@ func kubebuilderHelmEdit(isV2Alpha bool) error {
 		pluginKey = plugin.KeyFor(helmv1alpha.Plugin{})
 	}
 
-	args := []string{"edit", "--plugins", pluginKey}
+	args := []string{kubebuilderSubcommandEdit, flagPlugins, pluginKey}
 	if err := util.RunCmd("kubebuilder edit", "kubebuilder", args...); err != nil {
 		return fmt.Errorf("failed to run edit subcommand for Helm plugin: %w", err)
 	}

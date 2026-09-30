@@ -67,6 +67,8 @@
   - [Generating CRDs](./reference/generating-crd.md)
   - [Using Finalizers](./reference/using-finalizers.md)
   - [Good Practices](./reference/good-practices.md)
+  - [Server-Side Apply](./reference/server-side-apply.md)
+  - [License Header](./reference/license-header.md)
   - [Raising Events](./reference/raising-events.md)
   - [Watching Resources](./reference/watching-resources.md)
     - [Owned Resources](./reference/watching-resources/secondary-owned-resources.md)
@@ -83,6 +85,7 @@
     - [CRD Processing](./reference/markers/crd-processing.md)
     - [Webhook](./reference/markers/webhook.md)
     - [Object/DeepCopy](./reference/markers/object.md)
+    - [Apply Configuration](./reference/markers/applyconfiguration.md)
     - [RBAC](./reference/markers/rbac.md)
     - [Scaffold](./reference/markers/scaffold.md)
 

@@ -35,6 +35,11 @@ import (
 	"sigs.k8s.io/kubebuilder/v4/pkg/plugin"
 )
 
+const (
+	domainFlagArg = "--domain"
+	exampleDomain = "example.com"
+)
+
 var _ = Describe("Discover external plugins", func() {
 	Context("with valid plugins root path", func() {
 		var (
@@ -467,12 +472,12 @@ var _ = Describe("Discover external plugins", func() {
 			oldArgs := os.Args
 			defer func() { os.Args = oldArgs }()
 			os.Args = []string{
-				"kubebuilder",
-				"init",
-				"--plugins",
+				kubebuilderCommandName,
+				kubebuilderSubcommandInit,
+				pluginsFlagArg,
 				"myexternalplugin/v1",
-				"--domain",
-				"example.com",
+				domainFlagArg,
+				exampleDomain,
 				"--binary-flag",
 				"--license",
 				"apache2",
@@ -481,8 +486,8 @@ var _ = Describe("Discover external plugins", func() {
 
 			args := parseExternalPluginArgs()
 			Expect(args).Should(ContainElements(
-				"--domain",
-				"example.com",
+				domainFlagArg,
+				exampleDomain,
 				"--binary-flag",
 				"--license",
 				"apache2",
@@ -490,11 +495,53 @@ var _ = Describe("Discover external plugins", func() {
 			))
 
 			Expect(args).ShouldNot(ContainElements(
-				"kubebuilder",
-				"init",
-				"--plugins",
+				kubebuilderCommandName,
+				kubebuilderSubcommandInit,
+				pluginsFlagArg,
 				"myexternalplugin/v1",
 			))
+		})
+
+		It("should preserve flag values that contain a double hyphen", func() {
+			oldArgs := os.Args
+			defer func() { os.Args = oldArgs }()
+			os.Args = []string{
+				kubebuilderCommandName,
+				kubebuilderSubcommandInit,
+				pluginsFlagArg,
+				"myexternalplugin/v1",
+				"--repo",
+				"github.com/example/my--operator",
+				domainFlagArg,
+				"xn--bcher-kva.example",
+			}
+
+			args := parseExternalPluginArgs()
+			Expect(args).To(Equal([]string{
+				"--repo",
+				"github.com/example/my--operator",
+				domainFlagArg,
+				"xn--bcher-kva.example",
+			}))
+		})
+
+		It("should not forward --plugins=<value> (equals form) to external plugins", func() {
+			oldArgs := os.Args
+			defer func() { os.Args = oldArgs }()
+			os.Args = []string{
+				kubebuilderCommandName,
+				kubebuilderSubcommandInit,
+				"--plugins=myexternalplugin/v1",
+				domainFlagArg,
+				exampleDomain,
+			}
+
+			args := parseExternalPluginArgs()
+			Expect(args).Should(ContainElements(
+				domainFlagArg,
+				exampleDomain,
+			))
+			Expect(args).ShouldNot(ContainElement("--plugins=myexternalplugin/v1"))
 		})
 	})
 })
@@ -743,6 +790,29 @@ var _ = Describe("CLI options", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(c).NotTo(BeNil())
 			Expect(c.completionCommand).To(BeTrue())
+		})
+	})
+
+	Context("arguments", func() {
+		It("should use the arguments of the running program", func() {
+			originalArgs := os.Args
+			DeferCleanup(func() { os.Args = originalArgs })
+			os.Args = []string{kubebuilderCommandName, kubebuilderSubcommandInit, domainFlagArg, "example.com"}
+
+			c, err = newCLI()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(c).NotTo(BeNil())
+			Expect(c.args).To(Equal([]string{kubebuilderSubcommandInit, domainFlagArg, "example.com"}))
+		})
+
+		It("should be empty when the program takes no arguments", func() {
+			originalArgs := os.Args
+			DeferCleanup(func() { os.Args = originalArgs })
+			os.Args = []string{kubebuilderCommandName}
+
+			c, err = newCLI()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(c.args).To(BeEmpty())
 		})
 	})
 

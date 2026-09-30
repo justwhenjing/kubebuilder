@@ -1,0 +1,565 @@
+/*
+Copyright 2026 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package internal
+
+import (
+	"os"
+	"path/filepath"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	"github.com/spf13/afero"
+
+	cfgv3 "sigs.k8s.io/kubebuilder/v4/pkg/config/v3"
+	"sigs.k8s.io/kubebuilder/v4/pkg/machinery"
+)
+
+const (
+	testProjectName = "test-project"
+	testOutputDir   = "dist"
+)
+
+var _ = Describe("ChartScaffolder", func() {
+	Describe("PrepareTemplates", func() {
+		It("should add the generic metrics NetworkPolicy when it is missing", func() {
+			manifestsPath := filepath.Join(GinkgoT().TempDir(), "install.yaml")
+			Expect(os.WriteFile(manifestsPath, []byte(manifestsWithoutNetworkPolicy), 0o600)).To(Succeed())
+
+			fs := executeChartScaffolder(manifestsPath)
+
+			content, err := afero.ReadFile(fs, "dist/chart/templates/network-policy/allow-metrics-traffic.yaml")
+			Expect(err).NotTo(HaveOccurred())
+
+			rendered := string(content)
+			Expect(rendered).To(ContainSubstring(
+				"{{- if and .Values.networkPolicy.enabled .Values.metrics.enabled }}"))
+			Expect(rendered).To(ContainSubstring("kind: NetworkPolicy"))
+			Expect(rendered).To(ContainSubstring(
+				`name: {{ include "test-project.resourceName" (dict "suffix" "allow-metrics-traffic" "context" $) }}`))
+			Expect(rendered).To(ContainSubstring("metrics: enabled"))
+			Expect(rendered).To(ContainSubstring("port: {{ .Values.metrics.port }}"))
+
+			_, err = afero.ReadFile(fs, "dist/chart/templates/network-policy/allow-webhook-traffic.yaml")
+			Expect(err).To(HaveOccurred())
+
+			values, err := afero.ReadFile(fs, "dist/chart/values.yaml")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(values)).To(ContainSubstring("networkPolicy:\n  enabled: false"))
+		})
+
+		It("should add generic metrics and webhook NetworkPolicies when no policy exists", func() {
+			manifestsPath := filepath.Join(GinkgoT().TempDir(), "install.yaml")
+			Expect(os.WriteFile(
+				manifestsPath,
+				[]byte(manifestsWithWebhooksWithoutNetworkPolicy),
+				0o600,
+			)).To(Succeed())
+
+			fs := executeChartScaffolder(manifestsPath)
+
+			metricsPolicy, err := afero.ReadFile(
+				fs,
+				"dist/chart/templates/network-policy/allow-metrics-traffic.yaml",
+			)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(metricsPolicy)).To(ContainSubstring("metrics: enabled"))
+			Expect(string(metricsPolicy)).To(ContainSubstring("port: {{ .Values.metrics.port }}"))
+
+			webhookPolicy, err := afero.ReadFile(
+				fs,
+				"dist/chart/templates/network-policy/allow-webhook-traffic.yaml",
+			)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(webhookPolicy)).To(ContainSubstring("port: {{ .Values.webhook.port }}"))
+		})
+
+		It("should not add fallback policies when kustomize output provides NetworkPolicies", func() {
+			manifestsPath := filepath.Join(GinkgoT().TempDir(), "install.yaml")
+			Expect(os.WriteFile(
+				manifestsPath,
+				[]byte(manifestsWithMetricsNetworkPolicyAndWebhooks),
+				0o600,
+			)).To(Succeed())
+
+			fs := executeChartScaffolder(manifestsPath)
+
+			content, err := afero.ReadFile(fs, "dist/chart/templates/network-policy/allow-metrics-traffic.yaml")
+			Expect(err).NotTo(HaveOccurred())
+			rendered := string(content)
+			Expect(rendered).To(ContainSubstring(
+				"{{- if and .Values.networkPolicy.enabled .Values.metrics.enabled }}"))
+			Expect(rendered).To(ContainSubstring("metrics: enabled"))
+			Expect(rendered).To(ContainSubstring("port: {{ .Values.metrics.port }}"))
+
+			_, err = afero.ReadFile(fs, "dist/chart/templates/network-policy/allow-webhook-traffic.yaml")
+			Expect(err).To(HaveOccurred())
+
+			values, err := afero.ReadFile(fs, "dist/chart/values.yaml")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(values)).To(ContainSubstring("networkPolicy:\n  enabled: true"))
+		})
+
+		It("should produce only the metrics policy when kustomize output has no webhook", func() {
+			manifestsPath := filepath.Join(GinkgoT().TempDir(), "install.yaml")
+			Expect(os.WriteFile(
+				manifestsPath,
+				[]byte(manifestsWithMetricsNetworkPolicyNoWebhooks),
+				0o600,
+			)).To(Succeed())
+
+			fs := executeChartScaffolder(manifestsPath)
+
+			content, err := afero.ReadFile(fs, "dist/chart/templates/network-policy/allow-metrics-traffic.yaml")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(content)).To(ContainSubstring(
+				"{{- if and .Values.networkPolicy.enabled .Values.metrics.enabled }}"))
+			Expect(string(content)).To(ContainSubstring("port: {{ .Values.metrics.port }}"))
+
+			_, err = afero.ReadFile(fs, "dist/chart/templates/network-policy/allow-webhook-traffic.yaml")
+			Expect(err).To(HaveOccurred())
+
+			values, err := afero.ReadFile(fs, "dist/chart/values.yaml")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(values)).To(ContainSubstring("networkPolicy:\n  enabled: true"))
+		})
+
+		It("should preserve an egress NetworkPolicy from kustomize output", func() {
+			manifestsPath := filepath.Join(GinkgoT().TempDir(), "install.yaml")
+			Expect(os.WriteFile(
+				manifestsPath,
+				[]byte(manifestsWithEgressNetworkPolicy),
+				0o600,
+			)).To(Succeed())
+
+			fs := executeChartScaffolder(manifestsPath)
+
+			content, err := afero.ReadFile(fs, "dist/chart/templates/network-policy/allow-egress-dns.yaml")
+			Expect(err).NotTo(HaveOccurred())
+			rendered := string(content)
+			// Custom policies are gated on networkPolicy.enabled only, regardless of direction.
+			Expect(rendered).To(ContainSubstring("{{- if .Values.networkPolicy.enabled }}"))
+			Expect(rendered).NotTo(ContainSubstring(".Values.metrics.enabled"))
+			// Egress ports target other services and must not be rewritten to a manager port.
+			Expect(rendered).To(ContainSubstring("policyTypes:"))
+			Expect(rendered).To(ContainSubstring("- Egress"))
+			Expect(rendered).To(ContainSubstring("port: 53"))
+			Expect(rendered).NotTo(ContainSubstring(".Values.metrics.port"))
+			Expect(rendered).NotTo(ContainSubstring(".Values.webhook.port"))
+		})
+
+		It("should place all NetworkPolicies from kustomize output in the network-policy directory", func() {
+			manifestsPath := filepath.Join(GinkgoT().TempDir(), "install.yaml")
+			Expect(os.WriteFile(
+				manifestsPath,
+				[]byte(manifestsWithMultipleNetworkPolicies),
+				0o600,
+			)).To(Succeed())
+
+			fs := executeChartScaffolder(manifestsPath)
+
+			metricsPolicy, err := afero.ReadFile(
+				fs,
+				"dist/chart/templates/network-policy/allow-metrics-traffic.yaml",
+			)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(metricsPolicy)).To(ContainSubstring(
+				"{{- if and .Values.networkPolicy.enabled .Values.metrics.enabled }}"))
+			Expect(string(metricsPolicy)).To(ContainSubstring("metrics: enabled"))
+			Expect(string(metricsPolicy)).To(ContainSubstring("port: {{ .Values.metrics.port }}"))
+
+			dnsPolicy, err := afero.ReadFile(
+				fs,
+				"dist/chart/templates/network-policy/allow-dns-traffic.yaml",
+			)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(dnsPolicy)).To(ContainSubstring("{{- if .Values.networkPolicy.enabled }}"))
+			Expect(string(dnsPolicy)).To(ContainSubstring("dns: enabled"))
+			Expect(string(dnsPolicy)).To(ContainSubstring("port: 5353"))
+
+			webhookPolicy, err := afero.ReadFile(
+				fs,
+				"dist/chart/templates/network-policy/allow-webhook-traffic.yaml",
+			)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(webhookPolicy)).To(ContainSubstring(
+				"{{- if and .Values.networkPolicy.enabled .Values.webhook.enabled }}"))
+			Expect(string(webhookPolicy)).To(ContainSubstring("webhook: enabled"))
+			Expect(string(webhookPolicy)).To(ContainSubstring("port: {{ .Values.webhook.port }}"))
+
+			values, err := afero.ReadFile(fs, "dist/chart/values.yaml")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(values)).To(ContainSubstring("networkPolicy:\n  enabled: true"))
+		})
+
+		It("should add new kustomize NetworkPolicies after fallback policies were scaffolded", func() {
+			tmpDir := GinkgoT().TempDir()
+			firstManifestsPath := filepath.Join(tmpDir, "install-without-network-policy.yaml")
+			Expect(os.WriteFile(firstManifestsPath, []byte(manifestsWithoutNetworkPolicy), 0o600)).To(Succeed())
+
+			fs := executeChartScaffolder(firstManifestsPath)
+			_, err := afero.ReadFile(fs, "dist/chart/templates/network-policy/allow-metrics-traffic.yaml")
+			Expect(err).NotTo(HaveOccurred())
+
+			secondManifestsPath := filepath.Join(tmpDir, "install-with-custom-network-policies.yaml")
+			Expect(os.WriteFile(
+				secondManifestsPath,
+				[]byte(manifestsWithMultipleNetworkPolicies),
+				0o600,
+			)).To(Succeed())
+
+			executeChartScaffolderWithFS(secondManifestsPath, fs)
+
+			metricsPolicy, err := afero.ReadFile(
+				fs,
+				"dist/chart/templates/network-policy/allow-metrics-traffic.yaml",
+			)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(metricsPolicy)).To(ContainSubstring("metrics: enabled"))
+			Expect(string(metricsPolicy)).To(ContainSubstring("port: {{ .Values.metrics.port }}"))
+
+			dnsPolicy, err := afero.ReadFile(
+				fs,
+				"dist/chart/templates/network-policy/allow-dns-traffic.yaml",
+			)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(dnsPolicy)).To(ContainSubstring("dns: enabled"))
+			Expect(string(dnsPolicy)).To(ContainSubstring("port: 5353"))
+
+			webhookPolicy, err := afero.ReadFile(
+				fs,
+				"dist/chart/templates/network-policy/allow-webhook-traffic.yaml",
+			)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(webhookPolicy)).To(ContainSubstring(
+				"{{- if and .Values.networkPolicy.enabled .Values.webhook.enabled }}"))
+			Expect(string(webhookPolicy)).To(ContainSubstring("webhook: enabled"))
+			Expect(string(webhookPolicy)).To(ContainSubstring("port: {{ .Values.webhook.port }}"))
+
+			values, err := afero.ReadFile(fs, "dist/chart/values.yaml")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(values)).To(ContainSubstring("networkPolicy:\n  enabled: false"))
+		})
+
+		It("should error when no Deployment is found in the kustomize output", func() {
+			manifestsPath := filepath.Join(GinkgoT().TempDir(), "install.yaml")
+			Expect(os.WriteFile(manifestsPath, []byte(manifestsWithNoDeployment), 0o600)).To(Succeed())
+
+			scaffolder := NewChartScaffolder(ChartScaffolderConfig{
+				ProjectName:   testProjectName,
+				ManifestsFile: manifestsPath,
+				OutputDir:     testOutputDir,
+			})
+			_, err := scaffolder.PrepareTemplates(machinery.Filesystem{})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("unable to generate the chart"))
+			Expect(err.Error()).To(ContainSubstring("no Deployment found"))
+		})
+
+		It("should error when the Deployment has no containers", func() {
+			manifestsPath := filepath.Join(GinkgoT().TempDir(), "install.yaml")
+			Expect(os.WriteFile(manifestsPath, []byte(manifestsWithDeploymentNoContainers), 0o600)).To(Succeed())
+
+			scaffolder := NewChartScaffolder(ChartScaffolderConfig{
+				ProjectName:   testProjectName,
+				ManifestsFile: manifestsPath,
+				OutputDir:     testOutputDir,
+			})
+			_, err := scaffolder.PrepareTemplates(machinery.Filesystem{})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("unable to generate the chart"))
+			Expect(err.Error()).To(ContainSubstring("no manager container found"))
+		})
+
+		It("should error when multiple Deployments are present but none can be identified as the manager", func() {
+			manifestsPath := filepath.Join(GinkgoT().TempDir(), "install.yaml")
+			Expect(os.WriteFile(manifestsPath, []byte(manifestsWithAmbiguousDeployments), 0o600)).To(Succeed())
+
+			scaffolder := NewChartScaffolder(ChartScaffolderConfig{
+				ProjectName:   testProjectName,
+				ManifestsFile: manifestsPath,
+				OutputDir:     testOutputDir,
+			})
+			_, err := scaffolder.PrepareTemplates(machinery.Filesystem{})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("unable to generate the chart"))
+			Expect(err.Error()).To(ContainSubstring("could not identify the controller-manager"))
+			Expect(err.Error()).To(ContainSubstring("control-plane: controller-manager"))
+		})
+	})
+})
+
+func executeChartScaffolder(manifestsPath string) afero.Fs {
+	return executeChartScaffolderWithFS(manifestsPath, afero.NewMemMapFs())
+}
+
+func executeChartScaffolderWithFS(manifestsPath string, fs afero.Fs) afero.Fs {
+	scaffolder := NewChartScaffolder(ChartScaffolderConfig{
+		ProjectName:   testProjectName,
+		ManifestsFile: manifestsPath,
+		OutputDir:     testOutputDir,
+	})
+	builders, err := scaffolder.PrepareTemplates(machinery.Filesystem{})
+	Expect(err).NotTo(HaveOccurred())
+
+	cfg := cfgv3.New()
+	Expect(cfg.SetProjectName(testProjectName)).To(Succeed())
+
+	scaffold := machinery.NewScaffold(machinery.Filesystem{FS: fs}, machinery.WithConfig(cfg))
+	Expect(scaffold.Execute(builders...)).To(Succeed())
+
+	return fs
+}
+
+const manifestsWithoutNetworkPolicy = `apiVersion: v1
+kind: Namespace
+metadata:
+  name: test-system
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-project-controller-manager-metrics-service
+  namespace: test-system
+spec:
+  ports:
+    - name: https
+      port: 8443
+      targetPort: 8443
+  selector:
+    control-plane: controller-manager
+    app.kubernetes.io/name: test-project
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-project-controller-manager
+  namespace: test-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: test-project
+  template:
+    metadata:
+      labels:
+        control-plane: controller-manager
+        app.kubernetes.io/name: test-project
+    spec:
+      containers:
+        - name: manager
+          image: controller:latest
+`
+
+const manifestsWithWebhooksWithoutNetworkPolicy = manifestsWithoutNetworkPolicy + `---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: test-project-validating-webhook-configuration
+webhooks: []
+`
+
+const manifestsWithMetricsNetworkPolicyAndWebhooks = manifestsWithoutNetworkPolicy + `---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: test-project-allow-metrics-traffic
+  namespace: test-system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: test-project
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            metrics: enabled
+      ports:
+        - port: 8443
+          protocol: TCP
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: test-project-validating-webhook-configuration
+webhooks: []
+`
+
+const manifestsWithEgressNetworkPolicy = manifestsWithoutNetworkPolicy + `---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: test-project-allow-egress-dns
+  namespace: test-system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: test-project
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+      - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+`
+
+const manifestsWithMetricsNetworkPolicyNoWebhooks = manifestsWithoutNetworkPolicy + `---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: test-project-allow-metrics-traffic
+  namespace: test-system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: test-project
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            metrics: enabled
+      ports:
+        - port: 8443
+          protocol: TCP
+`
+
+const manifestsWithMultipleNetworkPolicies = manifestsWithoutNetworkPolicy + `---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: test-project-allow-metrics-traffic
+  namespace: test-system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: test-project
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            metrics: enabled
+      ports:
+        - port: 8443
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: test-project-allow-dns-traffic
+  namespace: test-system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: test-project
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            dns: enabled
+      ports:
+        - port: 5353
+          protocol: UDP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: test-project-allow-webhook-traffic
+  namespace: test-system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: test-project
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            webhook: enabled
+      ports:
+        - port: 9443
+          protocol: TCP
+`
+
+const manifestsWithDeploymentNoContainers = `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-project-controller-manager
+  namespace: test-system
+spec:
+  template:
+    spec:
+      containers: []
+`
+
+const manifestsWithNoDeployment = `apiVersion: v1
+kind: Namespace
+metadata:
+  name: test-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: test-project-controller-manager
+  namespace: test-system
+`
+
+const manifestsWithAmbiguousDeployments = `apiVersion: v1
+kind: Namespace
+metadata:
+  name: test-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alpha-operator
+  namespace: test-system
+spec:
+  template:
+    spec:
+      containers:
+      - name: worker
+        image: worker:latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: beta-operator
+  namespace: test-system
+spec:
+  template:
+    spec:
+      containers:
+      - name: worker
+        image: worker:latest
+`

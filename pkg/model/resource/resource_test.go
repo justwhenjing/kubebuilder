@@ -25,12 +25,13 @@ import (
 
 var _ = Describe("Resource", func() {
 	const (
-		group   = "group"
-		domain  = "test.io"
-		version = "v1"
-		kind    = "Kind"
-		plural  = "kinds"
-		v1beta1 = "v1beta1"
+		group         = "group"
+		domain        = "test.io"
+		version       = "v1"
+		kind          = "Kind"
+		plural        = "kinds"
+		v1beta1       = "v1beta1"
+		invalidPlural = "plural"
 	)
 
 	var (
@@ -96,10 +97,59 @@ var _ = Describe("Resource", func() {
 		DescribeTable("should fail for invalid Resources",
 			func(res Resource) { Expect(res.Validate()).NotTo(Succeed()) },
 			// Ensure that the rest of the fields are valid to check each part
-			Entry("invalid GVK", Resource{GVK: GVK{}, Plural: "plural"}),
+			Entry("invalid GVK", Resource{GVK: GVK{}, Plural: invalidPlural}),
 			Entry("invalid Plural", Resource{GVK: gvk, Plural: "Plural"}),
-			Entry("invalid API", Resource{GVK: gvk, Plural: "plural", API: &API{CRDVersion: "1"}}),
-			Entry("invalid Webhooks", Resource{GVK: gvk, Plural: "plural", Webhooks: &Webhooks{WebhookVersion: "1"}}),
+			Entry("invalid API", Resource{GVK: gvk, Plural: invalidPlural, API: &API{CRDVersion: "1"}}),
+			Entry("invalid Webhooks", Resource{GVK: gvk, Plural: invalidPlural, Webhooks: &Webhooks{WebhookVersion: "1"}}),
+		)
+
+		DescribeTable("should succeed for valid Paths",
+			func(p string) {
+				Expect(Resource{GVK: gvk, Plural: plural, Path: p}.Validate()).To(Succeed())
+			},
+			Entry("empty path (partial resource)", ""),
+			Entry("simple relative path", "api/v1"),
+			Entry("full module import path", "github.com/org/repo/api/v1"),
+			Entry("mixed-case import path", "GitHub.com/Org/Repo/api/v1"),
+			Entry("versioned domain", "gopkg.in/yaml.v3"),
+			Entry("multi-segment path with hyphen", "github.com/my-org/my-repo/api/v1"),
+			Entry("k8s core path", "k8s.io/api/core/v1"),
+		)
+
+		DescribeTable("should succeed for valid external Paths",
+			func(p string) {
+				Expect(Resource{GVK: gvk, Plural: plural, External: true, Path: p}.Validate()).To(Succeed())
+			},
+			Entry("full module import path", "github.com/org/repo/api/v1"),
+			Entry("k8s core path", "k8s.io/api/core/v1"),
+		)
+
+		DescribeTable("should fail for invalid Paths",
+			func(p, message string) {
+				err := Resource{GVK: gvk, Plural: plural, Path: p}.Validate()
+				Expect(err).NotTo(Succeed())
+				Expect(err.Error()).To(ContainSubstring("invalid Path"))
+				Expect(err.Error()).To(ContainSubstring(message))
+			},
+			Entry("absolute filesystem path", "/absolute/path", "empty path element"),
+			Entry("path traversal", "../traversal", `invalid path element ".."`),
+			Entry("double slash", "a//b", "double slash"),
+			Entry("trailing slash", "path/", "trailing slash"),
+		)
+
+		DescribeTable("should fail for invalid external Paths",
+			func(p, message string) {
+				err := Resource{GVK: gvk, Plural: plural, External: true, Path: p}.Validate()
+				Expect(err).NotTo(Succeed())
+				Expect(err.Error()).To(ContainSubstring("invalid Path"))
+				Expect(err.Error()).To(ContainSubstring(message))
+			},
+			Entry("empty path", "", "external resources must specify a path"),
+			Entry("bare domain", "example.com", "must include a package sub-path"),
+			Entry("absolute filesystem path", "/absolute/path", "must be a valid Go import path"),
+			Entry("relative package path", "api/v1", "must be a fully-qualified Go import path"),
+			Entry("leading-dot pseudo-domain", ".com/api/v1", "must be a fully-qualified Go import path"),
+			Entry("module version in path", "github.com/org/repo@v1.0.0", "version specifiers belong in the module field"),
 		)
 	})
 

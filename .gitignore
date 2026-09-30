@@ -13,6 +13,9 @@ docs/book/src/docs
 \#*#
 *.swp
 
+# skip kubebuilder binary when running go build in root
+kubebuilder
+
 # skip bin dirs
 **/bin
 **/testbin
@@ -28,7 +31,6 @@ vendor
 # different result depending on go version
 /testdata/**/go.sum
 /docs/book/src/simple-external-plugin-tutorial/testdata/sampleexternalplugin/v1/bin
-/testdata/**legacy**
 
 ## Skip testdata files that generate by tests using TestContext
 **/e2e-*/**

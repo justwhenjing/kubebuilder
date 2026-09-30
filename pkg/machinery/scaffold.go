@@ -24,6 +24,7 @@ import (
 	log "log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -231,7 +232,7 @@ func doTemplate(t Template) ([]byte, error) {
 
 	// TODO(adirio): move go-formatting to write step
 	// gofmt the imports
-	if filepath.Ext(t.GetPath()) == ".go" {
+	if filepath.Ext(t.GetPath()) == goFileExt {
 		var err error
 		if b, err = imports.Process(t.GetPath(), b, &options); err != nil {
 			return nil, fmt.Errorf("failed to process template: %w", err)
@@ -539,7 +540,7 @@ func (s Scaffold) writeFile(f *File) error {
 	}
 	defer func() {
 		if closeErr := writer.Close(); err == nil && closeErr != nil {
-			err = CloseFileError{err}
+			err = CloseFileError{closeErr}
 		}
 	}()
 
@@ -550,8 +551,12 @@ func (s Scaffold) writeFile(f *File) error {
 	return nil
 }
 
-// SubstituteYear replaces every occurrence of "YEAR" in the boilerplate string
-// with the current UTC year.
+var yearPlaceholder = regexp.MustCompile(`\bYEAR\b`)
+
+var nowFunc = time.Now
+
+// SubstituteYear replaces standalone "YEAR" placeholders in the boilerplate string
+// with the current local year.
 func SubstituteYear(boilerplate string) string {
-	return strings.ReplaceAll(boilerplate, "YEAR", strconv.Itoa(time.Now().UTC().Year()))
+	return yearPlaceholder.ReplaceAllString(boilerplate, strconv.Itoa(nowFunc().Year()))
 }

@@ -36,6 +36,11 @@ type Types struct {
 
 	// Port if informed we will create the scaffold with this spec
 	Port string
+
+	// SkipApplyConfig adds the +kubebuilder:ac:generate=false marker so this kind is
+	// excluded from ApplyConfiguration generation when another kind in the same
+	// group/version has SSA enabled.
+	SkipApplyConfig bool
 }
 
 // SetTemplateDefaults implements machinery.Template
@@ -64,6 +69,7 @@ const typesTemplate = `{{ .Boilerplate }}
 package {{ .Resource.Version }}
 
 import (
+	"k8s.io/apimachinery/pkg/runtime"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -110,6 +116,9 @@ type {{ .Resource.Kind }}Status struct {
 	Conditions []metav1.Condition ` + "`" + `json:"conditions,omitempty"` + "`" + `
 }
 
+{{- if .SkipApplyConfig }}
+// +kubebuilder:ac:generate=false
+{{- end }}
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 {{- if and (not .Resource.API.Namespaced) (not .Resource.IsRegularPlural) }}
@@ -147,6 +156,9 @@ type {{ .Resource.Kind }}List struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&{{ .Resource.Kind }}{}, &{{ .Resource.Kind }}List{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(SchemeGroupVersion, &{{ .Resource.Kind }}{}, &{{ .Resource.Kind }}List{})
+		return nil
+	})
 }
 `

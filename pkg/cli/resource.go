@@ -22,6 +22,7 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"sigs.k8s.io/kubebuilder/v4/pkg/config"
 	"sigs.k8s.io/kubebuilder/v4/pkg/model/resource"
 )
 
@@ -39,9 +40,9 @@ type resourceOptions struct {
 func bindResourceFlags(fs *pflag.FlagSet) *resourceOptions {
 	options := &resourceOptions{}
 
-	fs.StringVar(&options.Group, "group", "", "resource Group")
-	fs.StringVar(&options.Version, "version", "", "resource Version")
-	fs.StringVar(&options.Kind, "kind", "", "resource Kind")
+	fs.StringVar(&options.Group, "group", "", "Resource Group (e.g., batch, apps)")
+	fs.StringVar(&options.Version, "version", "", "Resource Version (e.g., v1, v1beta1)")
+	fs.StringVar(&options.Kind, "kind", "", "Resource Kind (e.g., CronJob, Deployment)")
 
 	return options
 }
@@ -67,6 +68,24 @@ func (opts resourceOptions) validate() error {
 	// Instead, this is checked by resource.GVK.Validate()
 
 	return nil
+}
+
+// resolveDomain adopts the stored Domain when exactly one tracked resource matches
+// by Group/Version/Kind. External resources carry their own Domain (e.g.
+// cert-manager.io) which the caller cannot supply when only G/V/K is on the CLI.
+// Zero or multiple G+V+K matches, keep the project domain.
+func (opts resourceOptions) resolveDomain(c config.Config) string {
+	resources, _ := c.GetResources()
+	domain, matches := opts.Domain, 0
+	for _, r := range resources {
+		if r.Group == opts.Group && r.Version == opts.Version && r.Kind == opts.Kind {
+			domain, matches = r.Domain, matches+1
+		}
+	}
+	if matches == 1 {
+		return domain
+	}
+	return opts.Domain
 }
 
 // newResource creates a new resource from the options

@@ -22,7 +22,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/pflag"
@@ -33,14 +32,13 @@ import (
 	"sigs.k8s.io/kubebuilder/v4/pkg/machinery"
 	"sigs.k8s.io/kubebuilder/v4/pkg/plugin"
 	"sigs.k8s.io/kubebuilder/v4/pkg/plugin/util"
+	"sigs.k8s.io/kubebuilder/v4/pkg/plugins/optional/helm/v2alpha/internal/common"
 	"sigs.k8s.io/kubebuilder/v4/pkg/plugins/optional/helm/v2alpha/scaffolds"
 )
 
 const (
 	// DefaultManifestsFile is the default path for kustomize output manifests
 	DefaultManifestsFile = "dist/install.yaml"
-	// DefaultOutputDir is the default output directory for Helm charts
-	DefaultOutputDir = "dist"
 	// v1AlphaPluginKey is the deprecated v1-alpha plugin key
 	v1AlphaPluginKey = "helm.kubebuilder.io/v1-alpha"
 )
@@ -56,10 +54,11 @@ type editSubcommand struct {
 
 //nolint:lll
 func (p *editSubcommand) UpdateMetadata(cliMeta plugin.CLIMetadata, subcmdMeta *plugin.SubcommandMetadata) {
-	subcmdMeta.Description = `Generate a Helm chart from your project's kustomize output.
+	subcmdMeta.Description = `Generate a Helm chart from your project's Kustomize output.
 
-Parses 'make build-installer' output (dist/install.yaml) and generates chart to allow easy
-distribution of your project. When enabled, adds Helm helpers targets to Makefile`
+The command reads 'make build-installer' output from dist/install.yaml by default. It adds default
+ServiceMonitor and NetworkPolicy templates when they are missing. On the first run, it also adds
+Helm deployment targets to the Makefile.`
 
 	subcmdMeta.Examples = fmt.Sprintf(`# Generate Helm chart from default manifests (dist/install.yaml) to default output (dist/)
   %[1]s edit --plugins=%[2]s
@@ -82,9 +81,9 @@ distribution of your project. When enabled, adds Helm helpers targets to Makefil
 
 **NOTE**: Chart.yaml is never overwritten (contains user-managed version info).
 Without --force, the plugin also preserves values.yaml, NOTES.txt, _helpers.tpl, .helmignore,
-and .github/workflows/test-chart.yml.
-All other template files in templates/ are always regenerated to match your current
-kustomize output. Use --force to regenerate all files except Chart.yaml.
+.github/workflows/test-chart.yml, and default NetworkPolicy and ServiceMonitor templates.
+Templates from the kustomize output always regenerate. Use --force to regenerate all files
+except Chart.yaml.
 
 The generated chart structure mirrors your config/ directory:
 <output>/chart/
@@ -97,15 +96,18 @@ The generated chart structure mirrors your config/ directory:
     ├── rbac/
     ├── manager/
     ├── webhook/
+    ├── network-policy/
     └── ...
 `, cliMeta.CommandName, plugin.KeyFor(Plugin{}))
 }
 
 func (p *editSubcommand) BindFlags(fs *pflag.FlagSet) {
-	fs.BoolVar(&p.force, "force", false, "if true, regenerates all the files")
+	fs.BoolVar(&p.force, "force", false, "If set, regenerate all files except Chart.yaml")
 	fs.StringVar(&p.manifestsFile, "manifests", DefaultManifestsFile,
-		"path to the YAML file containing Kubernetes manifests from kustomize output")
-	fs.StringVar(&p.outputDir, "output-dir", DefaultOutputDir, "output directory for the generated Helm chart")
+		"Path to the YAML file containing Kubernetes manifests from kustomize output "+
+			"(e.g., dist/install.yaml). Defaults to dist/install.yaml if unset")
+	fs.StringVar(&p.outputDir, "output-dir", common.DefaultOutputDir,
+		"Output directory for the generated Helm chart (e.g., charts). Defaults to dist if unset")
 }
 
 func (p *editSubcommand) InjectConfig(c config.Config) error {
@@ -121,7 +123,7 @@ func (p *editSubcommand) Scaffold(fs machinery.Filesystem) error {
 		}
 	}
 
-	scaffolder := scaffolds.NewKustomizeHelmScaffolder(p.config, p.force, p.manifestsFile, p.outputDir)
+	scaffolder := scaffolds.NewChartScaffolder(p.config, p.force, p.manifestsFile, p.outputDir)
 	scaffolder.InjectFS(fs)
 	err := scaffolder.Scaffold()
 	if err != nil {
@@ -184,7 +186,6 @@ func (p *editSubcommand) Scaffold(fs machinery.Filesystem) error {
 	return nil
 }
 
-// ensureManifestsExist runs make build-installer to generate the default manifests file
 func (p *editSubcommand) ensureManifestsExist() error {
 	slog.Info("Generating default manifests file", "file", p.manifestsFile)
 
@@ -205,45 +206,6 @@ func (p *editSubcommand) ensureManifestsExist() error {
 	return nil
 }
 
-// PostScaffold automatically uncomments cert-manager installation when webhooks are present
-func (p *editSubcommand) PostScaffold() error {
-	hasWebhooks := hasWebhooksWith(p.config)
-
-	if hasWebhooks {
-		workflowFile := filepath.Join(".github", "workflows", "test-chart.yml")
-		if _, err := os.Stat(workflowFile); err != nil {
-			slog.Info(
-				"Workflow file not found, unable to uncomment cert-manager installation",
-				"error", err,
-				"file", workflowFile,
-			)
-			return nil
-		}
-		target := `
-#      - name: Install cert-manager via Helm (wait for readiness)
-#        run: |
-#          helm repo add jetstack https://charts.jetstack.io
-#          helm repo update
-#          helm install cert-manager jetstack/cert-manager \
-#            --namespace cert-manager \
-#            --create-namespace \
-#            --set crds.enabled=true \
-#            --wait \
-#            --timeout 300s`
-		if err := util.UncommentCode(workflowFile, target, "#"); err != nil {
-			hasUncommented, errCheck := util.HasFileContentWith(workflowFile, "- name: Install cert-manager via Helm")
-			if !hasUncommented || errCheck != nil {
-				slog.Warn("Failed to uncomment cert-manager installation in workflow file", "error", err, "file", workflowFile)
-			}
-		} else {
-			target = `# TODO: Uncomment if cert-manager is enabled`
-			_ = util.ReplaceInFile(workflowFile, target, "")
-		}
-	}
-	return nil
-}
-
-// addHelmMakefileTargets appends Helm deployment targets to the Makefile if they don't already exist
 func (p *editSubcommand) addHelmMakefileTargets(namespace string) error {
 	makefilePath := "Makefile"
 	if _, err := os.Stat(makefilePath); os.IsNotExist(err) {
@@ -291,7 +253,7 @@ func (p *editSubcommand) extractNamespaceFromManifests() string {
 			if err == io.EOF {
 				break
 			}
-			continue
+			break
 		}
 
 		// Check if this is a Deployment (manager)
@@ -350,7 +312,7 @@ install-helm: ## Install the latest version of Helm.
 
 .PHONY: helm-deploy
 helm-deploy: install-helm ## Deploy manager to the K8s cluster via Helm. Specify an image with IMG.
-	$(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART_DIR) \
+	IMG="$(IMG)"; $(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART_DIR) \
 		--namespace $(HELM_NAMESPACE) \
 		--create-namespace \
 		--set manager.image.repository=$${IMG%%:*} \
@@ -378,21 +340,6 @@ helm-rollback: ## Rollback to previous Helm release.
 
 func helmMakefileTemplate(namespace, release, outputDir string) string {
 	return fmt.Sprintf(helmMakefileTemplateFormat, namespace, release, outputDir)
-}
-
-func hasWebhooksWith(c config.Config) bool {
-	resources, err := c.GetResources()
-	if err != nil {
-		return false
-	}
-
-	for _, res := range resources {
-		if res.HasDefaultingWebhook() || res.HasValidationWebhook() || res.HasConversionWebhook() {
-			return true
-		}
-	}
-
-	return false
 }
 
 // removeV1AlphaPluginEntry removes the deprecated helm.kubebuilder.io/v1-alpha plugin entry.

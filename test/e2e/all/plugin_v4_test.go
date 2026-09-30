@@ -81,26 +81,6 @@ var _ = Describe("kubebuilder", func() {
 			})
 		})
 
-		It("should generate a runnable project with metrics protected by network policies", func() {
-			helpers.GenerateV4WithNetworkPoliciesWithoutWebhooks(kbc)
-			helpers.Run(kbc, helpers.RunOptions{
-				HasWebhook:         false,
-				HasMetrics:         true,
-				HasNetworkPolicies: true,
-				InstallMethod:      helpers.InstallMethodKustomize,
-			})
-		})
-
-		It("should generate a runnable project with webhooks and metrics protected by network policies", func() {
-			helpers.GenerateV4WithNetworkPolicies(kbc)
-			helpers.Run(kbc, helpers.RunOptions{
-				HasWebhook:         true,
-				HasMetrics:         true,
-				HasNetworkPolicies: true,
-				InstallMethod:      helpers.InstallMethodKustomize,
-			})
-		})
-
 		It("should generate a runnable project with the manager running "+
 			"as restricted and without webhooks", func() {
 			helpers.GenerateV4WithoutWebhooks(kbc)
@@ -129,6 +109,27 @@ var _ = Describe("kubebuilder", func() {
 				HasMetrics:         true,
 				HasNetworkPolicies: false,
 				IsNamespaced:       true,
+				InstallMethod:      helpers.InstallMethodKustomize,
+			})
+		})
+
+		It("should generate a runnable project with Server-Side Apply (--ssa)", func() {
+			helpers.GenerateV4WithSSA(kbc)
+			helpers.Run(kbc, helpers.RunOptions{
+				HasWebhook:         false,
+				HasMetrics:         true,
+				HasNetworkPolicies: false,
+				InstallMethod:      helpers.InstallMethodKustomize,
+			})
+		})
+
+		It("should generate a runnable project with cluster-scoped "+
+			"Server-Side Apply (--ssa --namespaced=false)", func() {
+			helpers.GenerateV4WithSSAClusterScoped(kbc)
+			helpers.Run(kbc, helpers.RunOptions{
+				HasWebhook:         false,
+				HasMetrics:         true,
+				HasNetworkPolicies: false,
 				InstallMethod:      helpers.InstallMethodKustomize,
 			})
 		})

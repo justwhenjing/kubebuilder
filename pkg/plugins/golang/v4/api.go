@@ -61,68 +61,69 @@ type createAPISubcommand struct {
 func (p *createAPISubcommand) UpdateMetadata(cliMeta plugin.CLIMetadata, subcmdMeta *plugin.SubcommandMetadata) {
 	subcmdMeta.Description = `Scaffold a Kubernetes API by writing a Resource definition and/or a Controller.
 
-If information about whether the resource and controller should be scaffolded
-was not explicitly provided, it will prompt the user if they should be.
+If --resource or --controller is not explicitly set, Kubebuilder prompts for what to scaffold.
 
-After the scaffold is written, the dependencies will be updated and
-make generate will be run.
+After writing the scaffold, Kubebuilder updates dependencies. When an API resource is scaffolded,
+Kubebuilder runs make generate unless --make=false is set.
 `
-	subcmdMeta.Examples = fmt.Sprintf(`  # Create a frigates API with Group: ship, Version: v1beta1 and Kind: Frigate
-  %[1]s create api --group ship --version v1beta1 --kind Frigate
+	subcmdMeta.Examples = fmt.Sprintf(`  # Create a namespaced API resource and controller
+  %[1]s create api --group crew --version v1 --kind Captain
 
-  # Edit the API Scheme
+  # Create a cluster-scoped API resource without a controller
+  %[1]s create api --group crew --version v1 --kind Admiral --namespaced=false --controller=false
 
-  nano api/v1beta1/frigate_types.go
+  # Create an API resource scaffolded with Server-Side Apply support (alpha)
+  %[1]s create api --group crew --version v1 --kind Captain --ssa
 
-  # Edit the Controller
-  nano internal/controller/frigate/frigate_controller.go
-
-  # Edit the Controller Test
-  nano internal/controller/frigate/frigate_controller_test.go
-
-  # Generate the manifests
-  make manifests
-
-  # Install CRDs into the Kubernetes cluster using kubectl apply
-  make install
-
-  # Regenerate code and run against the Kubernetes cluster configured by ~/.kube/config
-  make run
+  # Create a controller for an external API type
+  %[1]s create api --group cert-manager --version v1 --kind Certificate \
+    --resource=false --controller=true \
+    --external-api-path github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1
 `, cliMeta.CommandName)
 }
 
 func (p *createAPISubcommand) BindFlags(fs *pflag.FlagSet) {
-	fs.BoolVar(&p.runMake, "make", true, "if true, run `make generate` after generating files")
+	fs.BoolVar(&p.runMake, "make", true,
+		"Run 'make generate' after generating files (enabled by default; use --make=false to disable)")
 
 	fs.BoolVar(&p.force, "force", false,
-		"attempt to create resource even if it already exists")
+		"If set, attempt to create resource even if it already exists")
 
 	p.options = &goPlugin.Options{}
 
-	fs.StringVar(&p.options.Plural, "plural", "", "resource irregular plural form")
+	fs.StringVar(&p.options.Plural, "plural", "",
+		"Resource irregular plural form (e.g., 'people' for 'Person'); auto-detected if not provided")
 
 	fs.BoolVar(&p.options.DoAPI, "resource", true,
-		"if set, generate the resource without prompting the user")
+		"Generate the resource without prompting the user (enabled by default; use --resource=false to disable)")
 	p.resourceFlag = fs.Lookup("resource")
-	fs.BoolVar(&p.options.Namespaced, "namespaced", true, "resource is namespaced")
+	fs.BoolVar(&p.options.Namespaced, "namespaced", true,
+		"Resource is namespaced by default; use --namespaced=false to create a cluster-scoped resource")
+
+	fs.BoolVar(&p.options.SSA, "ssa", false,
+		"(ALPHA) If set, scaffold this API with Server-Side Apply support "+
+			"(adds +genclient and applyconfiguration generation). "+
+			"Alpha feature: may change in future releases")
 
 	fs.BoolVar(&p.options.DoController, "controller", true,
-		"if set, generate the controller without prompting the user")
+		"Prompt whether to generate the controller by default; "+
+			"use --controller=true or --controller=false to skip the prompt")
 	p.controllerFlag = fs.Lookup("controller")
 
 	fs.StringVar(&p.options.ControllerName, "controller-name", "",
-		"name of the controller to scaffold (allows multiple controllers per resource)")
+		"Name of the controller to scaffold (e.g., frigate-controller); allows multiple controllers per resource")
 
 	fs.StringVar(&p.options.ExternalAPIPath, "external-api-path", "",
-		"Specify the Go package import path for the external API. This is used to scaffold controllers for resources "+
-			"defined outside this project (e.g., github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1).")
+		"Go package import path for the external API (e.g., github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1). "+
+			"Used to scaffold controllers for resources defined outside this project")
 
 	fs.StringVar(&p.options.ExternalAPIDomain, "external-api-domain", "",
-		"Specify the domain name for the external API. This domain is used to generate accurate RBAC "+
-			"markers and permissions for the external resources (e.g., cert-manager.io).")
+		"Domain suffix for the external API, combined with --group to form the qualified group "+
+			"(e.g., --group cert-manager --external-api-domain io => cert-manager.io). "+
+			"Used to generate accurate RBAC markers and permissions for the external resources")
 
 	fs.StringVar(&p.options.ExternalAPIModule, "external-api-module", "",
-		"external API module with optional version (e.g., github.com/cert-manager/cert-manager@v1.18.2)")
+		"External API module with optional version (e.g., github.com/cert-manager/cert-manager@v1.18.2)")
 }
 
 func (p *createAPISubcommand) InjectConfig(c config.Config) error {
@@ -143,16 +144,19 @@ func (p *createAPISubcommand) InjectResource(res *resource.Resource) error {
 		p.options.DoController = util.YesNo(reader)
 	}
 
-	// When scaffolding a controller without an API (--resource=false), copy essential
-	// fields from the existing resource in the PROJECT file, such as Path and Plural.
-	// Note: API, Controllers, and Webhooks are managed separately by UpdateResource.
-	if !p.options.DoAPI {
-		if existingRes, err := p.config.GetResource(res.GVK); err == nil {
+	if existingRes, err := p.config.GetResource(res.GVK); err == nil {
+		// When scaffolding a controller without an API (--resource=false), copy essential
+		// fields from the existing resource in the PROJECT file, such as Path and Plural.
+		// Note: API, Controllers, and Webhooks are managed separately by UpdateResource.
+		if !p.options.DoAPI {
 			p.resource.Path = existingRes.Path
 			p.resource.Plural = existingRes.Plural
 			p.resource.External = existingRes.External
 			p.resource.Core = existingRes.Core
 			p.resource.Module = existingRes.Module
+		} else if existingRes.API != nil && existingRes.API.SSA {
+			// SSA cannot be disabled, so keep the value tracked in the PROJECT file.
+			p.options.SSA = true
 		}
 	}
 
@@ -171,6 +175,11 @@ func (p *createAPISubcommand) InjectResource(res *resource.Resource) error {
 	// Validate that --external-api-module requires --external-api-path
 	if len(p.options.ExternalAPIModule) != 0 && len(p.options.ExternalAPIPath) == 0 {
 		return errors.New("'--external-api-module' requires '--external-api-path' to be specified")
+	}
+
+	// Validate that --ssa requires --resource=true
+	if p.options.SSA && !p.options.DoAPI {
+		return errors.New("'--ssa' can only be used when creating an API resource ('--resource=true')")
 	}
 
 	p.options.UpdateResource(p.resource, p.config)
