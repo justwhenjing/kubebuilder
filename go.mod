@@ -8,16 +8,16 @@ require (
 	github.com/gobuffalo/flect v1.0.3
 	github.com/h2non/gock v1.2.0
 	github.com/onsi/ginkgo/v2 v2.33.0
-	github.com/onsi/gomega v1.43.1
+	github.com/onsi/gomega v1.44.0
 	github.com/spf13/afero v1.15.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/mod v0.41.0
 	golang.org/x/text v0.42.0
-	golang.org/x/tools v0.50.0
+	golang.org/x/tools v0.51.0
 	helm.sh/helm/v3 v3.22.0
-	k8s.io/apimachinery v0.37.0
+	k8s.io/apimachinery v0.37.1
 	sigs.k8s.io/yaml v1.6.0
 )
 
