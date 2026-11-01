@@ -19,7 +19,6 @@ package appliers
 import (
 	"fmt"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -57,6 +56,8 @@ type customFieldsState struct {
 
 	currentBlock       blockType
 	currentBlockIndent int
+	// currentBlockStart is the index in the output of the first line after the current block's header.
+	currentBlockStart int
 }
 
 // TemplateDeploymentFields applies all Deployment-specific transformations.
@@ -111,14 +112,6 @@ func TemplateDeploymentFields(detectedPrefix, chartName, yamlContent string) str
 	return yamlContent
 }
 
-// isManagerContainerPresent reports whether yamlContent contains the manager container by literal or templated name.
-func isManagerContainerPresent(yamlContent string) bool {
-	containerName := GetDefaultContainerName(yamlContent)
-	hasLiteralName := strings.Contains(yamlContent, "name: "+containerName)
-	hasTemplatedName := strings.Contains(yamlContent, `name: {{ include "`) && strings.Contains(yamlContent, `"manager"`)
-	return hasLiteralName || hasTemplatedName
-}
-
 func templateReplicas(yamlContent string) string {
 	if strings.Contains(yamlContent, ".Values.manager.replicas") {
 		return yamlContent
@@ -138,6 +131,7 @@ func AddCustomLabelsAndAnnotations(yamlContent string) string {
 		strings.Contains(yamlContent, "{{- if .Values.manager.pod.annotations }}"))
 
 	lines := strings.Split(yamlContent, "\n")
+	inBlockScalar := blockScalarLines(lines)
 	result := make([]string, 0, len(lines))
 	state := &customFieldsState{
 		position:                     positionStart,
@@ -149,6 +143,11 @@ func AddCustomLabelsAndAnnotations(yamlContent string) string {
 
 	for i := range lines {
 		line := lines[i]
+		// Lines of a multi-line value are text, so they never open or close a block.
+		if inBlockScalar[i] {
+			result = append(result, line)
+			continue
+		}
 		trimmed := strings.TrimSpace(line)
 		indent, indentLen := LeadingWhitespace(line)
 
@@ -180,15 +179,14 @@ func AddCustomLabelsAndAnnotations(yamlContent string) string {
 }
 
 func templateEnvironmentVariables(yamlContent string) string {
-	if !isManagerContainerPresent(yamlContent) {
+	managerStartLine, managerEndLine := FindManagerContainerRange(yamlContent)
+	if managerStartLine < 0 {
 		return yamlContent
 	}
 
-	rangeStart, rangeEnd := FindManagerContainerRange(yamlContent)
-
 	lines := strings.Split(yamlContent, "\n")
 	for i := range lines {
-		if rangeStart >= 0 && (i < rangeStart || i > rangeEnd) {
+		if i < managerStartLine || i > managerEndLine {
 			continue
 		}
 		if strings.TrimSpace(lines[i]) != "env:" {
@@ -252,15 +250,18 @@ func templateEnvironmentVariables(yamlContent string) string {
 }
 
 func templateResources(yamlContent string) string {
-	if !isManagerContainerPresent(yamlContent) || !strings.Contains(yamlContent, "resources:") {
+	if !strings.Contains(yamlContent, "resources:") {
 		return yamlContent
 	}
 
-	rangeStart, rangeEnd := FindManagerContainerRange(yamlContent)
+	managerStartLine, managerEndLine := FindManagerContainerRange(yamlContent)
+	if managerStartLine < 0 {
+		return yamlContent
+	}
 
 	lines := strings.Split(yamlContent, "\n")
 	for i := range lines {
-		if rangeStart >= 0 && (i < rangeStart || i > rangeEnd) {
+		if i < managerStartLine || i > managerEndLine {
 			continue
 		}
 		if strings.TrimSpace(lines[i]) != "resources:" {
@@ -527,15 +528,18 @@ func templatePodSecurityContext(yamlContent string) string {
 }
 
 func templateContainerSecurityContext(yamlContent string) string {
-	if !isManagerContainerPresent(yamlContent) || !strings.Contains(yamlContent, "securityContext:") {
+	if !strings.Contains(yamlContent, "securityContext:") {
 		return yamlContent
 	}
 
-	rangeStart, rangeEnd := FindManagerContainerRange(yamlContent)
+	managerStartLine, managerEndLine := FindManagerContainerRange(yamlContent)
+	if managerStartLine < 0 {
+		return yamlContent
+	}
 
 	lines := strings.Split(yamlContent, "\n")
 	for i := range lines {
-		if rangeStart >= 0 && (i < rangeStart || i > rangeEnd) {
+		if i < managerStartLine || i > managerEndLine {
 			continue
 		}
 		if strings.TrimSpace(lines[i]) != "securityContext:" {
@@ -591,147 +595,203 @@ func templateContainerSecurityContext(yamlContent string) string {
 }
 
 func templateControllerManagerArgs(yamlContent string) string {
-	if !isManagerContainerPresent(yamlContent) {
+	managerStartLine, managerEndLine := FindManagerContainerRange(yamlContent)
+	if managerStartLine < 0 || managerEndLine < managerStartLine {
 		return yamlContent
 	}
 
-	rangeStart, rangeEnd := FindManagerContainerRange(yamlContent)
-
-	argsPattern := regexp.MustCompile(`(?m)([ \t]+)args:\n((?:[ \t]+-.*\n)+)`)
-	loc := argsPattern.FindStringSubmatchIndex(yamlContent)
-	if loc == nil {
+	lines := strings.Split(yamlContent, "\n")
+	managerContainerYAML := strings.Join(lines[managerStartLine:managerEndLine+1], "\n")
+	if strings.Contains(managerContainerYAML, ".Values.manager.args") {
 		return yamlContent
 	}
 
-	if rangeStart >= 0 {
-		matchLine := strings.Count(yamlContent[:loc[0]], "\n")
-		if matchLine < rangeStart || matchLine > rangeEnd {
-			return yamlContent
+	managerArguments := findManagerArguments(lines, managerStartLine, managerEndLine)
+	renderedArguments := renderManagerArguments(managerArguments)
+
+	return replaceManagerArguments(lines, managerEndLine, managerArguments, renderedArguments)
+}
+
+// managerArguments describes the existing manager args block and the controller flags
+// that must remain under Helm's control.
+type managerArguments struct {
+	startLine                int
+	endLine                  int
+	fieldIndent              string
+	itemIndent               string
+	inlineItemPrefix         string
+	metricsBindAddressLine   string
+	metricsBindAddressIndent string
+	healthProbeBindIndent    string
+	webhookPortLine          string
+	certificateArgumentLines []string
+}
+
+func findManagerArguments(lines []string, managerStartLine, managerEndLine int) managerArguments {
+	arguments := managerArguments{startLine: -1, endLine: -1}
+	for lineNumber := managerStartLine; lineNumber <= managerEndLine; lineNumber++ {
+		trimmedLine := strings.TrimSpace(lines[lineNumber])
+		if trimmedLine == "args:" || strings.HasPrefix(trimmedLine, "args: ") {
+			arguments.startLine = lineNumber
+			arguments.fieldIndent, _ = LeadingWhitespace(lines[lineNumber])
+			break
 		}
-	}
-
-	match := yamlContent[loc[0]:loc[1]]
-	if strings.Contains(match, ".Values.manager.args") {
-		return yamlContent
-	}
-
-	indent := yamlContent[loc[2]:loc[3]]
-	itemsBlock := yamlContent[loc[4]:loc[5]]
-
-	itemIndent := indent + "  "
-	lines := strings.Split(itemsBlock, "\n")
-	var (
-		metricsLine    string
-		metricsIndent  string
-		healthLine     string
-		webhookLine    string
-		preservedLines []string
-	)
-
-	for _, rawLine := range lines {
-		line := strings.TrimRight(rawLine, "\r")
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
+		if !strings.HasPrefix(trimmedLine, "- args:") {
 			continue
 		}
 
-		if itemIndent == indent+"  " {
-			if idx := strings.Index(line, "-"); idx > 0 {
-				itemIndent = line[:idx]
-			}
+		arguments.startLine = lineNumber
+		dashIndex := strings.Index(lines[lineNumber], "-")
+		arguments.inlineItemPrefix = lines[lineNumber][:dashIndex] + "- "
+		arguments.itemIndent = lines[lineNumber][:dashIndex] + "  "
+		break
+	}
+
+	if arguments.startLine < 0 {
+		containerIndent, _ := LeadingWhitespace(lines[managerStartLine])
+		arguments.fieldIndent = containerIndent + "  "
+		arguments.itemIndent = arguments.fieldIndent
+		return arguments
+	}
+
+	arguments.endLine = arguments.startLine
+	for lineNumber := arguments.startLine + 1; lineNumber <= managerEndLine; lineNumber++ {
+		trimmedLine := strings.TrimSpace(lines[lineNumber])
+		if trimmedLine == "" || !strings.HasPrefix(trimmedLine, "- ") {
+			break
 		}
 
+		argumentIndent, _ := LeadingWhitespace(lines[lineNumber])
+		if arguments.itemIndent == "" {
+			arguments.itemIndent = argumentIndent
+		}
+		if len(argumentIndent) != len(arguments.itemIndent) {
+			break
+		}
+
+		argumentLine := strings.TrimRight(lines[lineNumber], "\r")
+		trimmedArgumentLine := strings.TrimSpace(argumentLine)
 		switch {
-		case strings.Contains(trimmed, "--metrics-bind-address"):
-			metricsLine = line
-			if idx := strings.Index(line, "-"); idx > 0 {
-				metricsIndent = line[:idx]
-			}
-		case strings.Contains(trimmed, "--health-probe-bind-address"):
-			healthLine = line
-		case strings.Contains(trimmed, "--webhook-port"):
-			webhookLine = line
-		case strings.Contains(trimmed, "--webhook-cert-path"),
-			strings.Contains(trimmed, "--metrics-cert-path"):
-			preservedLines = append(preservedLines, line)
-		default:
-			// Remaining args will be handled through values.yaml
+		case strings.Contains(trimmedArgumentLine, "--metrics-bind-address"):
+			arguments.metricsBindAddressLine = argumentLine
+			arguments.metricsBindAddressIndent, _ = LeadingWhitespace(argumentLine)
+		case strings.Contains(trimmedArgumentLine, "--health-probe-bind-address"):
+			// The chart renders this arg from .Values.manager.healthProbeBindAddress.
+			arguments.healthProbeBindIndent, _ = LeadingWhitespace(argumentLine)
+		case strings.Contains(trimmedArgumentLine, "--webhook-port"):
+			arguments.webhookPortLine = argumentLine
+		case strings.Contains(trimmedArgumentLine, "--webhook-cert-path"),
+			strings.Contains(trimmedArgumentLine, "--metrics-cert-path"):
+			arguments.certificateArgumentLines = append(
+				arguments.certificateArgumentLines,
+				argumentLine,
+			)
 		}
+		arguments.endLine = lineNumber
+	}
+	if arguments.itemIndent == "" {
+		arguments.itemIndent = arguments.fieldIndent + "  "
 	}
 
-	var builder strings.Builder
-	builder.WriteString(indent)
-	builder.WriteString("args:\n")
+	return arguments
+}
 
-	if metricsLine != "" {
-		if metricsIndent == "" {
-			metricsIndent = itemIndent
+func renderManagerArguments(arguments managerArguments) []string {
+	metricsIndent := arguments.metricsBindAddressIndent
+	if metricsIndent == "" {
+		metricsIndent = arguments.itemIndent
+	}
+	metricsBindAddressLine := arguments.metricsBindAddressLine
+	if metricsBindAddressLine == "" {
+		metricsBindAddressLine = arguments.itemIndent + "- --metrics-bind-address=:{{ .Values.metrics.port }}"
+	}
+
+	rendered := []string{
+		arguments.fieldIndent + "args:",
+		metricsIndent + "{{- if .Values.metrics.enabled }}",
+		metricsBindAddressLine,
+		metricsIndent + "{{- if not .Values.metrics.secure }}",
+		metricsIndent + "- --metrics-secure=false",
+		metricsIndent + "{{- end }}",
+		metricsIndent + "{{- else }}",
+		metricsIndent + "# Bind to :0 to disable the controller-runtime managed metrics server",
+		metricsIndent + "- --metrics-bind-address=0",
+		metricsIndent + "{{- end }}",
+	}
+
+	// Always offered, so the address can be set from values.yaml. When the value is
+	// empty the chart passes no flag and the manager keeps its own default. "0" turns the
+	// server off; toString also matches the number 0 that `--set ...=0` produces.
+	healthIndent := arguments.healthProbeBindIndent
+	if healthIndent == "" {
+		healthIndent = arguments.itemIndent
+	}
+	rendered = append(rendered,
+		healthIndent+"{{- if or .Values.manager.healthProbeBindAddress "+
+			"(eq (toString .Values.manager.healthProbeBindAddress) \"0\") }}",
+		healthIndent+"- --health-probe-bind-address={{ .Values.manager.healthProbeBindAddress }}",
+		healthIndent+"{{- end }}",
+	)
+
+	if arguments.webhookPortLine != "" {
+		rendered = append(rendered,
+			arguments.itemIndent+"{{- if .Values.webhook.enabled }}",
+			arguments.webhookPortLine,
+			arguments.itemIndent+"{{- else }}",
+			arguments.itemIndent+"# Set -1 to disable the webhook server",
+			arguments.itemIndent+"- --webhook-port=-1",
+			arguments.itemIndent+"{{- end }}",
+		)
+	}
+
+	rendered = append(rendered,
+		arguments.itemIndent+"{{- range .Values.manager.args }}",
+		arguments.itemIndent+"- {{ tpl . $ }}",
+		arguments.itemIndent+"{{- end }}",
+	)
+
+	return append(rendered, arguments.certificateArgumentLines...)
+}
+
+func replaceManagerArguments(
+	lines []string,
+	managerEndLine int,
+	arguments managerArguments,
+	renderedArgumentLines []string,
+) string {
+	if arguments.startLine >= 0 {
+		if arguments.inlineItemPrefix != "" {
+			renderedArgumentLines[0] = arguments.inlineItemPrefix + renderedArgumentLines[0]
 		}
-		builder.WriteString(metricsIndent)
-		builder.WriteString("{{- if .Values.metrics.enabled }}\n")
-		builder.WriteString(metricsLine)
-		builder.WriteString("\n")
-		builder.WriteString(metricsIndent)
-		builder.WriteString("{{- if not .Values.metrics.secure }}\n")
-		builder.WriteString(metricsIndent)
-		builder.WriteString("- --metrics-secure=false\n")
-		builder.WriteString(metricsIndent)
-		builder.WriteString("{{- end }}\n")
-		builder.WriteString(metricsIndent)
-		builder.WriteString("{{- else }}\n")
-		builder.WriteString(metricsIndent)
-		builder.WriteString("# Bind to :0 to disable the controller-runtime managed metrics server\n")
-		builder.WriteString(metricsIndent)
-		builder.WriteString("- --metrics-bind-address=0\n")
-		builder.WriteString(metricsIndent)
-		builder.WriteString("{{- end }}\n")
-	}
-	if healthLine != "" {
-		builder.WriteString(healthLine)
-		builder.WriteString("\n")
-	}
-	if webhookLine != "" {
-		builder.WriteString(itemIndent)
-		builder.WriteString("{{- if .Values.webhook.enabled }}\n")
-		builder.WriteString(webhookLine)
-		builder.WriteString("\n")
-		builder.WriteString(itemIndent)
-		builder.WriteString("{{- else }}\n")
-		builder.WriteString(itemIndent)
-		builder.WriteString("# Set -1 to disable the webhook server\n")
-		builder.WriteString(itemIndent)
-		builder.WriteString("- --webhook-port=-1\n")
-		builder.WriteString(itemIndent)
-		builder.WriteString("{{- end }}\n")
+
+		removedLineCount := arguments.endLine - arguments.startLine + 1
+		updatedLines := make([]string, 0, len(lines)+len(renderedArgumentLines)-removedLineCount)
+		updatedLines = append(updatedLines, lines[:arguments.startLine]...)
+		updatedLines = append(updatedLines, renderedArgumentLines...)
+		updatedLines = append(updatedLines, lines[arguments.endLine+1:]...)
+		return strings.Join(updatedLines, "\n")
 	}
 
-	builder.WriteString(itemIndent)
-	builder.WriteString("{{- range .Values.manager.args }}\n")
-	builder.WriteString(itemIndent)
-	builder.WriteString("- {{ tpl . $ }}\n")
-	builder.WriteString(itemIndent)
-	builder.WriteString("{{- end }}\n")
-
-	for _, line := range preservedLines {
-		builder.WriteString(line)
-		builder.WriteString("\n")
+	insertionLine := managerEndLine + 1
+	if insertionLine == len(lines) && len(lines) > 0 && lines[len(lines)-1] == "" {
+		insertionLine--
 	}
-
-	newBlock := strings.TrimRight(builder.String(), "\n") + "\n"
-
-	return yamlContent[:loc[0]] + newBlock + yamlContent[loc[1]:]
+	updatedLines := make([]string, 0, len(lines)+len(renderedArgumentLines))
+	updatedLines = append(updatedLines, lines[:insertionLine]...)
+	updatedLines = append(updatedLines, renderedArgumentLines...)
+	updatedLines = append(updatedLines, lines[insertionLine:]...)
+	return strings.Join(updatedLines, "\n")
 }
 
 func templateImageReference(yamlContent string) string {
-	if !isManagerContainerPresent(yamlContent) {
+	managerStartLine, managerEndLine := FindManagerContainerRange(yamlContent)
+	if managerStartLine < 0 {
 		return yamlContent
 	}
 
-	rangeStart, rangeEnd := FindManagerContainerRange(yamlContent)
-
 	lines := strings.Split(yamlContent, "\n")
 	for i := 0; i < len(lines); i++ {
-		if rangeStart >= 0 && (i < rangeStart || i > rangeEnd) {
+		if i < managerStartLine || i > managerEndLine {
 			continue
 		}
 		trimmed := strings.TrimSpace(lines[i])
@@ -990,18 +1050,21 @@ func handleDeploymentAnnotations(
 		state.hasDeploymentAnnotations = true
 		state.currentBlock = blockDeploymentAnnotations
 		state.currentBlockIndent = indentLen
+		state.currentBlockStart = len(result)
 		return handleFlowStyleAnnotations(result, line, indent)
 	}
 
 	if shouldInjectDeploymentAnnotations(state, trimmed, indentLen) {
 		result = result[:len(result)-1]
 
-		existingKeys := extractKeysFromLines(result)
+		existingKeys := extractMapKeys(result[state.currentBlockStart:])
 		parentIndent := strings.Repeat(" ", state.currentBlockIndent)
-		childIndent := detectChildIndent(result, parentIndent)
+		// Each resource is re-marshaled with sigs.k8s.io/yaml before templating, so children sit
+		// 2 spaces under the header.
+		childIndent := parentIndent + "  "
 
 		if len(existingKeys) == 0 {
-			result = result[:len(result)-1]
+			result = result[:state.currentBlockStart-1]
 			childIndentWidth := strconv.Itoa(len(childIndent))
 			result = append(result,
 				parentIndent+"{{- if .Values.manager.annotations }}",
@@ -1010,7 +1073,7 @@ func handleDeploymentAnnotations(
 				parentIndent+"{{- end }}",
 			)
 		} else {
-			result = injectDeploymentAnnotations(result, childIndent)
+			result = injectDeploymentAnnotations(result, childIndent, existingKeys)
 		}
 
 		result = append(result, line)
@@ -1029,18 +1092,19 @@ func handlePodAnnotations(
 		(trimmed == common.YamlKeyAnnotations || strings.HasPrefix(trimmed, common.YamlKeyAnnotations)) {
 		state.currentBlock = blockPodAnnotations
 		state.currentBlockIndent = indentLen
+		state.currentBlockStart = len(result)
 		return handleFlowStyleAnnotations(result, line, indent)
 	}
 
 	if shouldInjectPodAnnotations(state, trimmed, indentLen) {
 		result = result[:len(result)-1]
 
-		existingKeys := extractKeysFromLines(result)
+		existingKeys := extractMapKeys(result[state.currentBlockStart:])
 		parentIndent := strings.Repeat(" ", state.currentBlockIndent)
-		childIndent := detectChildIndent(result, parentIndent)
+		childIndent := parentIndent + "  "
 
 		if len(existingKeys) == 0 {
-			result = result[:len(result)-1]
+			result = result[:state.currentBlockStart-1]
 			childIndentWidth := strconv.Itoa(len(childIndent))
 			result = append(result,
 				parentIndent+"{{- with .Values.manager.pod }}",
@@ -1051,7 +1115,7 @@ func handlePodAnnotations(
 				parentIndent+"{{- end }}",
 			)
 		} else {
-			result = addPodAnnotations(result, childIndent)
+			result = addPodAnnotations(result, childIndent, existingKeys)
 		}
 
 		result = append(result, line)
@@ -1064,7 +1128,7 @@ func handlePodAnnotations(
 		result = append(result, indent+"{{- with .Values.manager.pod }}")
 		result = append(result, indent+"{{- with .annotations }}")
 		result = append(result, indent+"annotations:")
-		result = addPodAnnotations(result, indent+"  ")
+		result = addPodAnnotations(result, indent+"  ", nil)
 		result = append(result, indent+"{{- end }}")
 		result = append(result, indent+"{{- end }}")
 		result = append(result, indent+common.YamlKeyLabels)
@@ -1104,14 +1168,15 @@ func handleDeploymentLabels(
 		trimmed == common.YamlKeyLabels {
 		state.currentBlock = blockDeploymentLabels
 		state.currentBlockIndent = indentLen
+		state.currentBlockStart = len(result)
 		return result
 	}
 
 	if shouldInjectDeploymentLabels(state, trimmed, indentLen) {
 		result = result[:len(result)-1]
-		parentIndent := strings.Repeat(" ", state.currentBlockIndent)
-		childIndent := detectChildIndent(result, parentIndent)
-		result = injectDeploymentLabels(result, childIndent)
+		existingKeys := extractMapKeys(result[state.currentBlockStart:])
+		childIndent := strings.Repeat(" ", state.currentBlockIndent) + "  "
+		result = injectDeploymentLabels(result, childIndent, existingKeys)
 		result = append(result, line)
 		state.addedLabelsToDeployment = true
 		state.currentBlock = blockNone
@@ -1129,14 +1194,15 @@ func handlePodLabels(
 		trimmed == common.YamlKeyLabels {
 		state.currentBlock = blockPodLabels
 		state.currentBlockIndent = indentLen
+		state.currentBlockStart = len(result)
 		return result
 	}
 
 	if shouldInjectPodLabels(state, trimmed, indentLen) {
 		result = result[:len(result)-1]
-		parentIndent := strings.Repeat(" ", state.currentBlockIndent)
-		childIndent := detectChildIndent(result, parentIndent)
-		result = injectPodLabels(result, childIndent)
+		existingKeys := extractMapKeys(result[state.currentBlockStart:])
+		childIndent := strings.Repeat(" ", state.currentBlockIndent) + "  "
+		result = injectPodLabels(result, childIndent, existingKeys)
 		result = append(result, line)
 		state.addedPodLabels = true
 		state.currentBlock = blockNone
@@ -1169,23 +1235,19 @@ func shouldInjectPodLabels(
 		trimmed != common.YamlKeyLabels
 }
 
-func injectDeploymentLabels(result []string, childIndent string) []string {
-	existingKeys := extractKeysFromLines(result)
+func injectDeploymentLabels(result []string, childIndent string, existingKeys []string) []string {
 	return appendHelmMapBlock(result, childIndent, ".Values.manager.labels", existingKeys)
 }
 
-func injectPodLabels(result []string, childIndent string) []string {
-	existingKeys := extractKeysFromLines(result)
+func injectPodLabels(result []string, childIndent string, existingKeys []string) []string {
 	return appendNestedHelmMapBlock(result, childIndent, ".Values.manager.pod", ".labels", existingKeys)
 }
 
-func injectDeploymentAnnotations(result []string, indent string) []string {
-	existingKeys := extractKeysFromLines(result)
+func injectDeploymentAnnotations(result []string, indent string, existingKeys []string) []string {
 	return appendHelmMapBlock(result, indent, ".Values.manager.annotations", existingKeys)
 }
 
-func addPodAnnotations(result []string, indent string) []string {
-	existingKeys := extractKeysFromLines(result)
+func addPodAnnotations(result []string, indent string, existingKeys []string) []string {
 	return appendNestedHelmMapBlock(result, indent, ".Values.manager.pod", ".annotations", existingKeys)
 }
 
@@ -1264,37 +1326,6 @@ func updateMetadataTracking(
 	if state.position == positionPodMetadata && trimmed == common.YamlKeySpec {
 		state.position = positionAfterDeploymentMetadata
 	}
-}
-
-// detectChildIndent detects the actual child indentation from existing entries in the current block.
-func detectChildIndent(lines []string, parentIndent string) string {
-	// Scan backwards to find the first child entry with indentation > parent
-	parentIndentLen := len(parentIndent)
-
-	for _, v := range slices.Backward(lines) {
-		line := v
-		trimmed := strings.TrimSpace(line)
-
-		// Skip empty lines and Helm template directives
-		if trimmed == "" || strings.HasPrefix(trimmed, "{{") {
-			continue
-		}
-
-		// Stop at section headers
-		if trimmed == common.YamlKeyLabels || trimmed == common.YamlKeyAnnotations ||
-			trimmed == common.YamlKeyMetadata || trimmed == common.YamlKeySpec || trimmed == common.YamlKeyTemplate {
-			break
-		}
-
-		// Find a line with indentation greater than parent (a child entry)
-		indent, indentLen := LeadingWhitespace(line)
-		if indentLen > parentIndentLen && strings.Contains(line, ":") {
-			return indent
-		}
-	}
-
-	// Default to 2-space indentation (sigs.k8s.io/yaml standard)
-	return parentIndent + "  "
 }
 
 // MakeContainerArgsConditional makes certificate path args conditional.

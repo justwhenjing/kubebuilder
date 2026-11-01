@@ -138,7 +138,7 @@ Don't confuse the `kubectl apply --server-side` command mentioned above with the
 
 - **`kubectl apply --server-side`** (discussed above): A kubectl flag that changes how CRDs are installed to avoid the annotation size limit. This is about CRD installation only.
 
-- **`--ssa` flag**: A Kubebuilder flag (e.g., `kubebuilder create api --ssa`) that scaffolds controllers with runtime behavior for managing resource fields using Server-Side Apply patterns. This is about controller runtime behavior, specifically for scenarios where your controller shares field ownership with users or other controllers. It does NOT change how `make install` applies CRDs.
+- **`--ssa` flag**: A Kubebuilder flag (e.g., `kubebuilder create api --ssa`) that scaffolds the markers and Makefile changes so `controller-gen` generates Server-Side Apply types for your kinds. Use them in your controller when it shares field ownership with users or other controllers. You write the Apply call yourself; see the [Server-Side Apply](./reference/server-side-apply.md) reference. It does NOT change how `make install` applies CRDs.
 
 See the [Kubernetes Server-Side Apply documentation][k8s-ssa-docs] to learn more about the Server-Side Apply concept in general.
 
@@ -227,6 +227,16 @@ make docker-build IMG=<some-registry>/<project>:tag BASE_IMAGE=<myregistry>/gola
 
 A matching alias is used without consulting `unqualified-search-registries`, so it works even when that list is empty. It also ignores the tag, so one entry covers all `golang` tags. Prefer it over adding `docker.io` to the search list, which changes how every unqualified image name resolves on the host. For rootless Podman, use `$HOME/.config/containers/registries.conf.d/golang.conf`.
 
+## How can I turn off the health probe server of the manager?
+
+Set `--health-probe-bind-address=0` in the manager args in `config/manager/manager.yaml`. controller-runtime then does not start the server, so nothing serves `/healthz` and `/readyz`.
+
+The same file has a liveness and a readiness probe on port `8081`. Remove both when you turn the server off. Otherwise the readiness probe fails, so the Pod never becomes ready, and the liveness probe fails, so the kubelet keeps restarting the manager.
+
+Without probes, Kubernetes no longer restarts a manager that stops responding, and it treats the Pod as ready as soon as the container starts.
+
+If you deploy with the chart from the [helm/v2-alpha][helm-v2-alpha-health] plugin, set `manager.healthProbeBindAddress` to `0` instead. The chart then leaves out the probes itself.
+
 [k8s-obj-creation]: https://kubernetes.io/docs/tasks/manage-kubernetes-objects/declarative-config/#how-to-create-objects
 [gvk]: ./cronjob-tutorial/gvks.md
 [project-file-def]: ./reference/project-config.md
@@ -238,6 +248,7 @@ A matching alias is used without consulting `unqualified-search-registries`, so 
 [k8s-ssa-docs]: https://kubernetes.io/docs/reference/using-api/server-side-apply/
 [dockerignore-kb-issue]: https://github.com/kubernetes-sigs/kubebuilder/issues/5181
 [dockerignore-buildah-issue]: https://github.com/containers/buildah/issues/6417
+[helm-v2-alpha-health]: ./plugins/available/helm-v2-alpha.md#health-probe-address-configuration
 [podman-registries-conf]: https://github.com/containers/image/blob/main/docs/containers-registries.conf.5.md
 [podman-registries-conf-d]: https://github.com/containers/image/blob/main/docs/containers-registries.conf.d.5.md
 [podman-shortnames]: https://github.com/containers/shortnames

@@ -12,6 +12,7 @@ linters:
     - errcheck
     - ginkgolinter
     - goconst
+    - gocritic
     - gocyclo
     - govet
     - importas
@@ -39,6 +40,16 @@ linters:
     ginkgolinter:
       forbid-focus-container: true
       forbid-spec-pollution: true
+    gocritic:
+      # Only the ruleguard rules of the project. They keep tests that depend on
+      # the Kubebuilder binary on utils.NewTestContext, as AGENTS.md says.
+      disable-all: true
+      enabled-checks:
+        - ruleguard
+      settings:
+        ruleguard:
+          failOn: dsl,import
+          rules: "${config-path}/hack/lint/ruleguard/rules.go"
     govet:
       disable:
         - fieldalignment
@@ -46,8 +57,6 @@ linters:
     importas:
       no-unaliased: true
       alias:
-        - pkg: sigs.k8s.io/kubebuilder/v4/pkg/plugins/optional/helm/v1alpha
-          alias: helmv1alpha
         - pkg: sigs.k8s.io/kubebuilder/v4/pkg/plugins/optional/helm/v2alpha
           alias: helmv2alpha
         - pkg: sigs.k8s.io/kubebuilder/v4/pkg/plugins/optional/grafana/v1alpha

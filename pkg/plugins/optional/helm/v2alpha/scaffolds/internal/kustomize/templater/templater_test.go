@@ -39,6 +39,19 @@ const (
 	expectedIssuerName = `name: {{ include "test-project.resourceName" (dict "suffix" "selfsigned-issuer" "context" $) }}`
 
 	k8sSpecField = "spec"
+
+	// healthProbePortExpr is the port of .Values.manager.healthProbeBindAddress, 8081 when empty
+	healthProbePortExpr = `{{ .Values.manager.healthProbeBindAddress | default ":8081" | toString` +
+		` | splitList ":" | last | int }}`
+
+	// healthProbeOnExpr is false when .Values.manager.healthProbeBindAddress turns the server off
+	healthProbeOnExpr = `{{- if ne (toString .Values.manager.healthProbeBindAddress) "0" }}`
+
+	// healthProbeArgBlock is the value-driven --health-probe-bind-address arg in the manager args
+	healthProbeArgBlock = `        {{- if or .Values.manager.healthProbeBindAddress ` +
+		`(eq (toString .Values.manager.healthProbeBindAddress) "0") }}
+        - --health-probe-bind-address={{ .Values.manager.healthProbeBindAddress }}
+        {{- end }}`
 )
 
 var _ = Describe("Templater", func() {
@@ -199,7 +212,8 @@ spec:
 			Expect(result).To(ContainSubstring("{{- if not .Values.metrics.secure }}"))
 			Expect(result).To(ContainSubstring("- --metrics-secure=false"))
 			Expect(result).To(ContainSubstring("- --metrics-bind-address=0"))
-			Expect(result).To(ContainSubstring("- --health-probe-bind-address=:{{ .Values.manager.healthProbe.port }}"))
+			Expect(result).To(ContainSubstring(healthProbeArgBlock))
+			Expect(result).NotTo(ContainSubstring("--health-probe-bind-address=:8081"))
 			Expect(result).To(ContainSubstring(`{{- if .Values.webhook.enabled }}
         - --webhook-port={{ .Values.webhook.port }}
         {{- else }}
@@ -592,8 +606,8 @@ metadata:
 
 			result := templater.ApplyHelmSubstitutions(content, serviceMonitorResource)
 
-			// Should be wrapped with prometheus enabled conditional
-			Expect(result).To(ContainSubstring("{{- if .Values.prometheus.enabled }}"))
+			// Should be wrapped with prometheus and metrics enabled conditional
+			Expect(result).To(ContainSubstring("{{- if and .Values.prometheus.enabled .Values.metrics.enabled }}"))
 			Expect(result).To(ContainSubstring("{{- end }}"))
 		})
 
@@ -2484,6 +2498,74 @@ spec:
 			Expect(result).NotTo(ContainSubstring("containerPort: 9443"))
 		})
 
+		It("should template the webhook-server port when it also sets hostIP and hostPort", func() {
+			deployment := &unstructured.Unstructured{}
+			deployment.SetAPIVersion("apps/v1")
+			deployment.SetKind("Deployment")
+			deployment.SetName("test-project-controller-manager")
+
+			// kustomize sorts the keys of a port, so hostIP and hostPort come between containerPort and name.
+			content := `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-project-controller-manager
+spec:
+  template:
+    spec:
+      containers:
+      - name: manager
+        ports:
+        - containerPort: 9443
+          hostIP: 10.0.0.1
+          hostPort: 19443
+          name: webhook-server
+          protocol: TCP`
+
+			result := templater.templatePorts(content, deployment)
+
+			Expect(result).NotTo(ContainSubstring("containerPort: 9443"))
+			Expect(result).To(ContainSubstring(`        {{- if .Values.webhook.enabled }}
+        - containerPort: {{ .Values.webhook.port }}
+          hostIP: 10.0.0.1
+          hostPort: 19443
+          name: webhook-server
+          protocol: TCP
+        {{- end }}`))
+		})
+
+		It("should render the webhook-server port only when webhooks are enabled when it also sets appProtocol", func() {
+			deployment := &unstructured.Unstructured{}
+			deployment.SetAPIVersion("apps/v1")
+			deployment.SetKind("Deployment")
+			deployment.SetName("test-project-controller-manager")
+
+			// kustomize sorts appProtocol before containerPort.
+			content := `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-project-controller-manager
+spec:
+  template:
+    spec:
+      containers:
+      - name: manager
+        ports:
+        - appProtocol: https
+          containerPort: 9443
+          name: webhook-server
+          protocol: TCP`
+
+			result := templater.templatePorts(content, deployment)
+
+			Expect(result).NotTo(ContainSubstring("containerPort: 9443"))
+			Expect(result).To(ContainSubstring(`        {{- if .Values.webhook.enabled }}
+        - appProtocol: https
+          containerPort: {{ .Values.webhook.port }}
+          name: webhook-server
+          protocol: TCP
+        {{- end }}`))
+		})
+
 		It("should template health probe ports in Deployment", func() {
 			deployment := &unstructured.Unstructured{}
 			deployment.SetAPIVersion("apps/v1")
@@ -2510,14 +2592,11 @@ spec:
 
 			result := templater.templatePorts(content, deployment)
 
-			Expect(result).To(ContainSubstring("port: {{ .Values.manager.healthProbe.port }}"))
+			// No "health" containerPort to name, so the probes take the port of the address.
+			Expect(result).To(ContainSubstring("port: " + healthProbePortExpr))
 			Expect(result).NotTo(ContainSubstring("port: 8081"))
 		})
 
-		// Regression test for #5865: the health probe port must be templated in all
-		// four places it appears in the manager Deployment (bind-address arg, the
-		// "health" containerPort, and the liveness and readiness httpGet ports), so it
-		// can be configured from values.yaml like the metrics and webhook ports.
 		It("should template every health probe port reference in the manager Deployment", func() {
 			deployment := &unstructured.Unstructured{}
 			deployment.SetAPIVersion("apps/v1")
@@ -2550,13 +2629,159 @@ spec:
 
 			result := templater.templatePorts(content, deployment)
 
-			Expect(result).To(ContainSubstring("--health-probe-bind-address=:{{ .Values.manager.healthProbe.port }}"))
-			Expect(result).To(ContainSubstring("containerPort: {{ .Values.manager.healthProbe.port }}"))
+			Expect(result).To(ContainSubstring("containerPort: " + healthProbePortExpr))
 			Expect(result).To(ContainSubstring(`            path: /healthz
-            port: {{ .Values.manager.healthProbe.port }}`))
+            port: health`))
 			Expect(result).To(ContainSubstring(`            path: /readyz
-            port: {{ .Values.manager.healthProbe.port }}`))
-			Expect(result).NotTo(ContainSubstring("8081"))
+            port: health`))
+			Expect(result).NotTo(ContainSubstring("port: 8081"))
+			Expect(result).To(ContainSubstring("        " + healthProbeOnExpr + `
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+        {{- end }}`))
+			Expect(result).To(ContainSubstring("        " + healthProbeOnExpr + `
+        - containerPort: ` + healthProbePortExpr + `
+          name: health
+          protocol: TCP
+        {{- end }}`))
+			Expect(result).To(ContainSubstring("        " + healthProbeOnExpr + `
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+        {{- end }}`))
+		})
+
+		It("should template the health port when it also sets hostIP and hostPort", func() {
+			deployment := &unstructured.Unstructured{}
+			deployment.SetAPIVersion("apps/v1")
+			deployment.SetKind("Deployment")
+			deployment.SetName("test-project-controller-manager")
+
+			content := `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-project-controller-manager
+spec:
+  template:
+    spec:
+      containers:
+      - name: manager
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+        ports:
+        - containerPort: 8081
+          hostIP: 10.0.0.1
+          hostPort: 9999
+          name: health
+          protocol: TCP`
+
+			result := templater.templatePorts(content, deployment)
+
+			Expect(result).NotTo(ContainSubstring(": 8081"))
+			Expect(result).To(ContainSubstring("        " + healthProbeOnExpr + `
+        - containerPort: ` + healthProbePortExpr + `
+          hostIP: 10.0.0.1
+          hostPort: 9999
+          name: health
+          protocol: TCP
+        {{- end }}`))
+			Expect(result).To(ContainSubstring("path: /healthz\n            port: health"))
+		})
+
+		It("should render the health port only while the server is on when it also sets appProtocol", func() {
+			deployment := &unstructured.Unstructured{}
+			deployment.SetAPIVersion("apps/v1")
+			deployment.SetKind("Deployment")
+			deployment.SetName("test-project-controller-manager")
+
+			// kustomize sorts appProtocol before containerPort.
+			content := `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-project-controller-manager
+spec:
+  template:
+    spec:
+      containers:
+      - name: manager
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+        ports:
+        - appProtocol: http
+          containerPort: 8081
+          name: health
+          protocol: TCP`
+
+			result := templater.templatePorts(content, deployment)
+
+			Expect(result).NotTo(ContainSubstring(": 8081"))
+			Expect(result).To(ContainSubstring("        " + healthProbeOnExpr + `
+        - appProtocol: http
+          containerPort: ` + healthProbePortExpr + `
+          name: health
+          protocol: TCP
+        {{- end }}`))
+			Expect(result).To(ContainSubstring("path: /healthz\n            port: health"))
+		})
+
+		It("should only template the health probe of the manager container, not of a sidecar", func() {
+			deployment := &unstructured.Unstructured{}
+			deployment.SetAPIVersion("apps/v1")
+			deployment.SetKind("Deployment")
+			deployment.SetName("test-project-controller-manager")
+
+			content := `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-project-controller-manager
+spec:
+  template:
+    spec:
+      containers:
+      - name: sidecar
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9000
+        ports:
+        - containerPort: 9000
+          name: health
+          protocol: TCP
+      - name: manager
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081`
+
+			result := templater.templatePorts(content, deployment)
+
+			sidecar, manager, found := strings.Cut(result, "      - name: manager")
+			Expect(found).To(BeTrue())
+			Expect(sidecar).To(ContainSubstring(`      - name: sidecar
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9000
+        ports:
+        - containerPort: 9000
+          name: health
+          protocol: TCP`))
+			Expect(sidecar).NotTo(ContainSubstring("{{"))
+			Expect(manager).To(ContainSubstring("path: /healthz\n            port: " + healthProbePortExpr))
+			Expect(manager).To(ContainSubstring("path: /readyz\n            port: " + healthProbePortExpr))
+			Expect(manager).NotTo(ContainSubstring("port: health"))
+			Expect(strings.Count(manager, healthProbeOnExpr)).To(Equal(2))
 		})
 
 		It("should leave probes using the named health port untouched", func() {
@@ -2591,8 +2816,7 @@ spec:
 
 			result := templater.templatePorts(content, deployment)
 
-			Expect(result).To(ContainSubstring("--health-probe-bind-address=:{{ .Values.manager.healthProbe.port }}"))
-			Expect(result).To(ContainSubstring("containerPort: {{ .Values.manager.healthProbe.port }}"))
+			Expect(result).To(ContainSubstring("containerPort: " + healthProbePortExpr))
 			Expect(result).To(ContainSubstring(`            path: /healthz
             port: health`))
 			Expect(result).To(ContainSubstring(`            path: /readyz
@@ -2621,7 +2845,9 @@ spec:
 			result := templater.templatePorts(content, deployment)
 
 			Expect(result).To(ContainSubstring("--metrics-bind-address=localhost:{{ .Values.metrics.port }}"))
-			Expect(result).To(ContainSubstring("--health-probe-bind-address=localhost:{{ .Values.manager.healthProbe.port }}"))
+			// The whole address comes from .Values.manager.healthProbeBindAddress through the
+			// manager args, see "health probe bind address" below.
+			Expect(result).To(ContainSubstring("--health-probe-bind-address=localhost:8081"))
 		})
 
 		It("should preserve the host when templating bind-address args in IPv6 form", func() {
@@ -2646,7 +2872,7 @@ spec:
 			result := templater.templatePorts(content, deployment)
 
 			Expect(result).To(ContainSubstring("--metrics-bind-address=[::1]:{{ .Values.metrics.port }}"))
-			Expect(result).To(ContainSubstring("--health-probe-bind-address=[::1]:{{ .Values.manager.healthProbe.port }}"))
+			Expect(result).To(ContainSubstring("--health-probe-bind-address=[::1]:8081"))
 		})
 
 		It("should template port-related args in Deployment", func() {
@@ -2673,7 +2899,7 @@ spec:
 
 			Expect(result).To(ContainSubstring("--metrics-bind-address=:{{ .Values.metrics.port }}"))
 			Expect(result).NotTo(ContainSubstring("--metrics-bind-address=:8443"))
-			Expect(result).To(ContainSubstring("--health-probe-bind-address=:{{ .Values.manager.healthProbe.port }}"))
+			Expect(result).To(ContainSubstring("--health-probe-bind-address=:8081"))
 			Expect(result).To(ContainSubstring("--leader-elect"))
 		})
 
@@ -2709,9 +2935,107 @@ spec:
 			Expect(result).To(ContainSubstring("--metrics-bind-address=:{{ .Values.metrics.port }}"))
 			Expect(result).To(ContainSubstring("--webhook-port={{ .Values.webhook.port }}"))
 			Expect(result).To(ContainSubstring("containerPort: {{ .Values.webhook.port }}"))
-			Expect(result).To(ContainSubstring("--health-probe-bind-address=:{{ .Values.manager.healthProbe.port }}"))
-			Expect(result).To(ContainSubstring("port: {{ .Values.manager.healthProbe.port }}"))
-			Expect(result).NotTo(ContainSubstring(":9091"))
+			Expect(result).To(ContainSubstring("port: " + healthProbePortExpr))
+			Expect(result).NotTo(ContainSubstring("port: 9091"))
+		})
+
+		Context("health probe bind address", func() {
+			managerDeployment := func(args string) (string, *unstructured.Unstructured) {
+				deployment := &unstructured.Unstructured{}
+				deployment.SetAPIVersion("apps/v1")
+				deployment.SetKind("Deployment")
+				deployment.SetName("test-project-controller-manager")
+
+				return `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-project-controller-manager
+spec:
+  template:
+    spec:
+      containers:
+      - args:
+        - --leader-elect
+` + args + `        image: controller:latest
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9440
+        name: manager
+        ports:
+        - containerPort: 9440
+          name: health
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 9440
+`, deployment
+			}
+
+			DescribeTable("should render the flag, the port and the probes from the value only",
+				func(arg, literal string) {
+					content, deployment := managerDeployment(arg)
+
+					result := templater.ApplyHelmSubstitutions(content, deployment)
+
+					Expect(result).To(ContainSubstring(healthProbeArgBlock))
+					Expect(strings.Count(result, "--health-probe-bind-address")).To(Equal(1))
+					if literal != "" {
+						Expect(result).NotTo(ContainSubstring(literal))
+					}
+					Expect(result).NotTo(ContainSubstring("9440"))
+					Expect(result).To(ContainSubstring("containerPort: " + healthProbePortExpr + "\n          name: health"))
+					Expect(result).To(ContainSubstring("path: /healthz\n            port: health"))
+					Expect(result).To(ContainSubstring("path: /readyz\n            port: health"))
+					Expect(strings.Count(result, healthProbeOnExpr)).To(Equal(3))
+				},
+				Entry("without a host", "        - --health-probe-bind-address=:9440\n", ":9440"),
+				Entry("with all interfaces", "        - --health-probe-bind-address=0.0.0.0:9440\n", "0.0.0.0"),
+				Entry("with localhost", "        - --health-probe-bind-address=localhost:9440\n", "localhost"),
+				Entry("with an IPv4 address", "        - --health-probe-bind-address=127.0.0.1:9440\n", "127.0.0.1"),
+				Entry("with an IPv6 address", "        - --health-probe-bind-address=[::1]:9440\n", "[::1]"),
+				Entry("turned off", "        - --health-probe-bind-address=0\n", "--health-probe-bind-address=0"),
+				Entry("when the project's manager does not set the flag", "", ""),
+			)
+
+			It("should render the manager's flag when a sidecar with its own args comes first", func() {
+				_, deployment := managerDeployment("")
+				content := `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-project-controller-manager
+spec:
+  template:
+    spec:
+      containers:
+      - args:
+        - --health-probe-bind-address=:9090
+        image: sidecar:latest
+        name: sidecar
+      - args:
+        - --leader-elect
+        - --metrics-bind-address=:8443
+        - --health-probe-bind-address=:9440
+        - --webhook-port=9443
+        image: controller:latest
+        name: manager
+`
+
+				result := templater.ApplyHelmSubstitutions(content, deployment)
+
+				_, containers, found := strings.Cut(result, "      containers:\n")
+				Expect(found).To(BeTrue())
+				sidecar, manager, found := strings.Cut(containers, "        name: sidecar\n")
+				Expect(found).To(BeTrue())
+				Expect(sidecar).To(ContainSubstring("- --health-probe-bind-address=:9090\n        image: sidecar:latest"))
+				Expect(sidecar).NotTo(ContainSubstring("{{"))
+				Expect(manager).To(ContainSubstring(healthProbeArgBlock))
+				Expect(manager).NotTo(ContainSubstring("9440"))
+				Expect(manager).To(ContainSubstring("{{- if .Values.metrics.enabled }}"))
+				Expect(manager).To(ContainSubstring("{{- if .Values.webhook.enabled }}"))
+				Expect(manager).To(ContainSubstring("{{- range .Values.manager.args }}"))
+			})
 		})
 
 		It("should not template non-webhook/metrics resources", func() {
@@ -4532,6 +4856,72 @@ spec:
 		})
 
 		Context("when binding RBAC permissions to ServiceAccount", func() {
+			DescribeTable("resolves the manager after unrelated binding subjects",
+				func(kind, name string) {
+					binding := &unstructured.Unstructured{}
+					binding.SetAPIVersion("rbac.authorization.k8s.io/v1")
+					binding.SetKind(kind)
+					binding.SetName("test-project-" + name)
+
+					content := `apiVersion: rbac.authorization.k8s.io/v1
+kind: ` + kind + `
+metadata:
+  name: test-project-` + name + `
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: User
+  name: alice
+- kind: ServiceAccount
+  name: observer
+  namespace: external
+- kind: ServiceAccount
+  name: controller-manager
+  namespace: other-team
+- apiGroup: ""
+  kind: ServiceAccount
+  name: test-project-controller-manager
+  namespace: test-project-system
+- kind: ServiceAccount
+  name: controller-manager
+  namespace: another-team
+- kind: ServiceAccount
+  name: test-project-controller-manager
+  namespace: other-team
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: operators`
+
+					result := templater.ApplyHelmSubstitutions(content, binding)
+
+					Expect(result).To(ContainSubstring(`subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: User
+  name: alice
+- kind: ServiceAccount
+  name: observer
+  namespace: external
+- kind: ServiceAccount
+  name: controller-manager
+  namespace: other-team
+- apiGroup: ""
+  kind: ServiceAccount
+  name: {{ include "test-project.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+- kind: ServiceAccount
+  name: controller-manager
+  namespace: another-team
+- kind: ServiceAccount
+  name: {{ include "test-project.resourceName" (dict "suffix" "controller-manager" "context" $) }}
+  namespace: other-team
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: operators`))
+				},
+				Entry("manager ClusterRoleBinding", "ClusterRoleBinding", "manager-rolebinding"),
+				Entry("leader-election RoleBinding", "RoleBinding", "leader-election-rolebinding"),
+				Entry("metrics-auth ClusterRoleBinding", "ClusterRoleBinding", "metrics-auth-rolebinding"),
+			)
+
 			It("references ServiceAccount consistently in RoleBinding subjects", func() {
 				roleBinding := &unstructured.Unstructured{}
 				roleBinding.SetAPIVersion("rbac.authorization.k8s.io/v1")
@@ -4549,7 +4939,7 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: controller-manager
-  namespace: system`
+  namespace: test-project-system`
 
 				result := templater.ApplyHelmSubstitutions(content, roleBinding)
 
@@ -4574,7 +4964,7 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: controller-manager
-  namespace: system`
+  namespace: test-project-system`
 
 				result := templater.ApplyHelmSubstitutions(content, clusterRoleBinding)
 

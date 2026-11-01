@@ -22,6 +22,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"sigs.k8s.io/yaml"
 
 	"sigs.k8s.io/kubebuilder/v4/pkg/plugins/optional/helm/v2alpha/scaffolds/internal/extractor"
 )
@@ -106,6 +107,18 @@ var _ = Describe("HelmValues", func() {
 			Expect(result).To(ContainSubstring("prometheus:\n  enabled: false\n\n" +
 				"  ## Custom ServiceMonitor labels\n  ##\n  # labels: {}\n\n" +
 				"  ## Custom ServiceMonitor annotations\n  ##\n  # annotations: {}\n"))
+		})
+	})
+
+	Describe("ServiceAccount section", func() {
+		It("should enable the ServiceAccount and set no name, labels or annotations", func() {
+			values := &HelmValues{Extraction: nil}
+			values.ProjectName = testProjectName
+
+			var rendered map[string]any
+			Expect(yaml.Unmarshal([]byte(values.generateValues()), &rendered)).To(Succeed())
+
+			Expect(rendered["serviceAccount"]).To(Equal(map[string]any{"enabled": true}))
 		})
 	})
 
@@ -271,15 +284,17 @@ var _ = Describe("HelmValues", func() {
 
 	Describe("Custom ports extraction", func() {
 		DescribeTable("port values emitted from detected features",
-			func(metricsPort, webhookPort, healthProbePort, wantMetrics, wantWebhook, wantHealthProbe int) {
+			func(metricsPort, webhookPort int, healthProbeBindAddress string, wantMetrics, wantWebhook int,
+				wantHealthProbe string,
+			) {
 				values := &HelmValues{
 					Extraction: &extractor.Extraction{
 						Features: extractor.FeatureSet{
-							HasMetrics:      true,
-							HasWebhooks:     true,
-							MetricsPort:     metricsPort,
-							WebhookPort:     webhookPort,
-							HealthProbePort: healthProbePort,
+							HasMetrics:             true,
+							HasWebhooks:            true,
+							MetricsPort:            metricsPort,
+							WebhookPort:            webhookPort,
+							HealthProbeBindAddress: healthProbeBindAddress,
 						},
 					},
 				}
@@ -291,23 +306,26 @@ var _ = Describe("HelmValues", func() {
 					ContainSubstring(fmt.Sprintf("port: %d", wantMetrics)))
 				Expect(extractSection(result, "webhook:")).To(
 					ContainSubstring(fmt.Sprintf("port: %d", wantWebhook)))
-				Expect(extractSection(result, "healthProbe:")).To(
-					ContainSubstring(fmt.Sprintf("port: %d", wantHealthProbe)))
+				Expect(result).To(ContainSubstring(
+					fmt.Sprintf("\n  healthProbeBindAddress: %q\n", wantHealthProbe)))
 			},
-			Entry("default ports", 0, 0, 0, 8443, 9443, 8081),
-			Entry("custom metrics port", 8080, 0, 0, 8080, 9443, 8081),
-			Entry("custom webhook port", 0, 9090, 0, 8443, 9090, 8081),
-			Entry("custom health probe port", 0, 0, 9091, 8443, 9443, 9091),
-			Entry("all custom ports", 8888, 9999, 7777, 8888, 9999, 7777),
+			Entry("default ports", 0, 0, ":8081", 8443, 9443, ":8081"),
+			Entry("custom metrics port", 8080, 0, ":8081", 8080, 9443, ":8081"),
+			Entry("custom webhook port", 0, 9090, ":8081", 8443, 9090, ":8081"),
+			Entry("custom health probe port", 0, 0, ":9091", 8443, 9443, ":9091"),
+			Entry("health probe address with a host", 0, 0, "localhost:9440", 8443, 9443, "localhost:9440"),
+			Entry("no health probe flag in the project", 0, 0, "", 8443, 9443, ""),
+			Entry("all custom ports", 8888, 9999, ":7777", 8888, 9999, ":7777"),
 		)
 
 		Context("when the project has no webhooks or metrics", func() {
-			It("should still emit the healthProbe section with the default port", func() {
+			It("should still emit the health probe bind address", func() {
 				values := &HelmValues{
 					Extraction: &extractor.Extraction{
 						Features: extractor.FeatureSet{
-							HasMetrics:  false,
-							HasWebhooks: false,
+							HasMetrics:             false,
+							HasWebhooks:            false,
+							HealthProbeBindAddress: ":8081",
 						},
 					},
 				}
@@ -315,8 +333,7 @@ var _ = Describe("HelmValues", func() {
 
 				result := values.generateValues()
 
-				healthProbeSection := extractSection(result, "healthProbe:")
-				Expect(healthProbeSection).To(ContainSubstring("port: 8081"))
+				Expect(result).To(ContainSubstring("\n  healthProbeBindAddress: \":8081\"\n"))
 			})
 
 			It("should emit the webhook section disabled so templates can reference webhook.enabled", func() {
@@ -338,15 +355,16 @@ var _ = Describe("HelmValues", func() {
 			})
 		})
 
-		Context("healthProbe placement", func() {
-			It("should nest the healthProbe block under the manager section", func() {
+		Context("health probe bind address placement", func() {
+			It("should nest healthProbeBindAddress under the manager section with the default address", func() {
 				values := &HelmValues{}
 				values.ProjectName = testProjectName
 
 				result := values.generateValues()
 
-				Expect(result).To(ContainSubstring("  healthProbe:\n    # Health probe server port\n    port: 8081\n"))
-				Expect(result).NotTo(ContainSubstring("\nhealthProbe:"))
+				Expect(result).To(ContainSubstring("\n  healthProbeBindAddress: \":8081\"\n"))
+				Expect(result).NotTo(ContainSubstring("\nhealthProbeBindAddress:"))
+				Expect(result).NotTo(ContainSubstring("healthProbe:"))
 			})
 		})
 	})

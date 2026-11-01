@@ -51,6 +51,10 @@ const (
 	kubebuilderSubcommandInit       = "init"
 	kubebuilderSubcommandVersion    = "version"
 	kubebuilderSubcommandCompletion = "completion"
+	createCommand                   = "create"
+	apiCommand                      = "api"
+	webhookCommand                  = "webhook"
+	editCommand                     = "edit"
 	pluginGoKubebuilderV4           = "go.kubebuilder.io/v4"
 	pluginGoKubebuilderV3           = "go.kubebuilder.io/v3"
 	pluginGoKubebuilderV2           = "go.kubebuilder.io/v2"
@@ -103,6 +107,10 @@ type CLI struct {
 	flagErr error
 	// configSkipped reports whether the project configuration was left unread.
 	configSkipped bool
+	// builtWith holds the plugin keys the command tree was built with.
+	builtWith []string
+	// builtForVersion holds the project version the command tree was built for.
+	builtForVersion config.Version
 
 	// A filtered set of plugins that should be used by command constructors.
 	resolvedPlugins []plugin.Plugin
@@ -184,7 +192,7 @@ func defaultArgs() []string {
 func (c *CLI) buildCmd() {
 	c.cmd = c.newRootCmd()
 
-	c.configSkipped = isSubcommandWithoutConfig(c.args)
+	c.configSkipped = isSubcommandWithoutConfig(c.args) && !c.isAliasOfExtraCommandWithConfig()
 
 	if err := c.resolveInfo(!c.configSkipped); err != nil {
 		// Cobra has not parsed the command line yet, so the command that will run is unknown.
@@ -196,6 +204,10 @@ func (c *CLI) buildCmd() {
 		}
 		c.resolveWithoutConfig()
 	}
+
+	// The tree cannot be built again, so keep its chain to compare a later read against.
+	c.builtWith = slices.Clone(c.pluginKeys)
+	c.builtForVersion = c.projectVersion
 
 	c.addSubcommands()
 }
@@ -229,18 +241,16 @@ func (c *CLI) resolveInfo(readConfig bool) error {
 // was built. The tree cannot be built again, so a plugin chain that differs from the one it was
 // built with is reported as an error instead of scaffolding with the wrong plugins.
 func (c *CLI) resolveSkippedConfig() error {
-	builtWith := slices.Clone(c.pluginKeys)
-	builtForVersion := c.projectVersion
 	c.forgetPluginChain()
 
 	if err := c.resolveInfo(true); err != nil {
 		return err
 	}
 
-	if !slices.Equal(c.pluginKeys, builtWith) || c.projectVersion.Compare(builtForVersion) != 0 {
+	if !slices.Equal(c.pluginKeys, c.builtWith) || c.projectVersion.Compare(c.builtForVersion) != 0 {
 		return fmt.Errorf("the command tree was built for the plugin chain %q but the project requires %q: "+
 			"run the program with the arguments of the command that Command().SetArgs runs",
-			strings.Join(builtWith, ","), strings.Join(c.pluginKeys, ","))
+			strings.Join(c.builtWith, ","), strings.Join(c.pluginKeys, ","))
 	}
 
 	return nil
@@ -304,6 +314,12 @@ func (c *CLI) getInfo(readConfig bool) error {
 	if readConfig {
 		switch err := c.getInfoFromConfigFile(); {
 		case err == nil:
+			// Resolve the project's own chain before --plugins replaces it. A project whose
+			// plugins cannot be found is broken, whatever the command line asks for.
+			if chainErr := c.checkConfigChain(); chainErr != nil {
+				configErr = chainErr
+				hasConfigFile = false
+			}
 		case errors.Is(err, os.ErrNotExist):
 			hasConfigFile = false
 		default:
@@ -329,6 +345,14 @@ func (c *CLI) getInfo(readConfig bool) error {
 	c.getInfoFromDefaults()
 
 	return nil
+}
+
+// checkConfigChain reports an error when the plugin chain of the project configuration cannot be
+// resolved. It leaves no plugins resolved.
+func (c *CLI) checkConfigChain() error {
+	defer func() { c.resolvedPlugins = nil }()
+
+	return c.resolvePlugins()
 }
 
 // getInfoFromConfigFile obtains the project version and plugin keys from the project config file.
@@ -448,9 +472,10 @@ var subcommandsWithoutConfig = []string{
 // their command tree.
 func isSubcommandWithoutConfig(args []string) bool {
 	positional := positionalArgs(args)
-	// With no subcommand, Cobra displays root help. Configuration is not required.
+	// Root flags on their own display root help, which needs no configuration. With no arguments, a
+	// tool may set the arguments of the command later, so a usable configuration is read.
 	if len(positional) == 0 {
-		return len(args) == 0 || hasOnlyRootFlags(args)
+		return len(args) > 0 && hasOnlyRootFlags(args)
 	}
 
 	// The help command consumes the remaining arguments as the command whose help is requested.
@@ -460,7 +485,46 @@ func isSubcommandWithoutConfig(args []string) bool {
 		return len(positional) == 1 || isSubcommandPathWithoutConfig(positional[1:])
 	}
 
+	// Completion reads the configuration only for the commands the plugin chain builds, whose flags
+	// depend on the plugins the project names.
+	if isShellCompletionRequest(positional[0]) {
+		return !completesPluginCommand(args[slices.Index(args, positional[0])+1:])
+	}
+
 	return isSubcommandPathWithoutConfig(positional)
+}
+
+// pluginCommandPaths are the subcommand paths of the commands that the plugin chain builds.
+var pluginCommandPaths = [][]string{
+	{kubebuilderSubcommandInit},
+	{editCommand},
+	{createCommand, apiCommand},
+	{createCommand, webhookCommand},
+}
+
+// isShellCompletionRequest reports whether arg names the hidden command Cobra runs to complete a
+// command line.
+func isShellCompletionRequest(arg string) bool {
+	return arg == cobra.ShellCompRequestCmd || arg == cobra.ShellCompNoDescRequestCmd
+}
+
+// completesPluginCommand reports whether the arguments of a completion request complete a word for a
+// command that the plugin chain builds, or the name of that command. Cobra passes the word being
+// completed last, so `create api` completes the name of create api.
+func completesPluginCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+
+	return slices.ContainsFunc(pluginCommandPaths, func(pluginPath []string) bool {
+		return hasPathPrefix(positionalArgs(args[:len(args)-1]), pluginPath) ||
+			hasPathPrefix(positionalArgs(args), pluginPath)
+	})
+}
+
+// hasPathPrefix reports whether path starts with prefix.
+func hasPathPrefix(path, prefix []string) bool {
+	return len(path) >= len(prefix) && slices.Equal(path[:len(prefix)], prefix)
 }
 
 // isSubcommandPathWithoutConfig returns true for a subcommand path that never consumes the PROJECT
@@ -530,6 +594,15 @@ func patchProjectFileInMemoryIfNeeded(fs afero.Fs, path string) error {
 // It is extracted from getInfoFromConfigFile for testing purposes.
 func (c *CLI) getInfoFromConfig(projectConfig config.Config) error {
 	c.pluginKeys = projectConfig.GetPluginChain()
+	if isAlphaGenerateCommand(c.args) {
+		// Resolve the current Helm plugin without changing legacy metadata used by migration.
+		c.pluginKeys = append([]string(nil), c.pluginKeys...)
+		for i, key := range c.pluginKeys {
+			if key == "helm.kubebuilder.io/v1-alpha" {
+				c.pluginKeys[i] = "helm.kubebuilder.io/v2-alpha"
+			}
+		}
+	}
 	c.projectVersion = projectConfig.GetVersion()
 
 	for _, pluginKey := range c.pluginKeys {

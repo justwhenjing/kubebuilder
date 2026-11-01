@@ -18,6 +18,7 @@ package appliers
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -50,49 +51,129 @@ func SubstituteRBACValues(detectedPrefix, chartName, yamlContent string) string 
 
 // TemplateServiceAccountNameInBindings templates SA name in RoleBinding/ClusterRoleBinding subjects.
 func TemplateServiceAccountNameInBindings(detectedPrefix, chartName, yamlContent string) string {
-	replacement := `{{ include "` + chartName + `.serviceAccountName" . }}`
+	lines := strings.Split(yamlContent, "\n")
+	subjectsLine := slices.Index(lines, "subjects:")
+	if subjectsLine < 0 {
+		return yamlContent
+	}
 
-	// Handle already-templated resourceName (from substituteResourceNamesWithPrefix)
-	templatedPattern := regexp.MustCompile(
-		`(?m)(subjects:\s*\n\s*-\s*kind:\s*ServiceAccount\s*\n\s+name:\s+)` +
-			regexp.QuoteMeta(`{{ include "`+chartName+`.resourceName" (dict "suffix" "controller-manager" "context" $) }}`))
-	yamlContent = templatedPattern.ReplaceAllString(yamlContent, `${1}`+replacement)
+	for start := subjectsLine + 1; start < len(lines); {
+		trimmed := strings.TrimSpace(lines[start])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			start++
+			continue
+		}
+		_, indent := LeadingWhitespace(lines[start])
+		if !strings.HasPrefix(trimmed, "- ") {
+			break
+		}
 
-	// Handle literal names with prefix
-	subjectPattern := regexp.MustCompile(
-		`(?m)(subjects:\s*\n\s*-\s*kind:\s*ServiceAccount\s*\n\s+name:\s+)` +
-			regexp.QuoteMeta(detectedPrefix) + `-controller-manager`)
-	yamlContent = subjectPattern.ReplaceAllString(yamlContent, `${1}`+replacement)
+		end := start + 1
+		for end < len(lines) {
+			trimmed = strings.TrimSpace(lines[end])
+			_, nextIndent := LeadingWhitespace(lines[end])
+			if trimmed != "" && !strings.HasPrefix(trimmed, "#") && nextIndent <= indent {
+				break
+			}
+			end++
+		}
+		templateServiceAccountSubject(lines[start:end], detectedPrefix, chartName)
+		start = end
+	}
 
-	// Handle literal names without prefix
-	subjectPatternSimple := regexp.MustCompile(
-		`(?m)(subjects:\s*\n\s*-\s*kind:\s*ServiceAccount\s*\n\s+name:\s+)controller-manager`)
-	yamlContent = subjectPatternSimple.ReplaceAllString(yamlContent, `${1}`+replacement)
-
-	return yamlContent
+	return strings.Join(lines, "\n")
 }
 
-// TemplateServiceAccountNameInDeployment templates serviceAccountName in Deployment spec.
+// Keep substitutions within one subject because Helm expressions prevent YAML decoding here.
+func templateServiceAccountSubject(lines []string, detectedPrefix, chartName string) {
+	var kind, name, namespace string
+	nameLine := -1
+	_, subjectIndent := LeadingWhitespace(lines[0])
+	for i, line := range lines {
+		field := strings.TrimSpace(line)
+		if i == 0 {
+			field = strings.TrimPrefix(field, "- ")
+		} else if _, indent := LeadingWhitespace(line); indent != subjectIndent+2 {
+			continue
+		}
+		key, value, found := strings.Cut(field, ":")
+		if !found {
+			continue
+		}
+		switch key {
+		case "kind":
+			kind = strings.TrimSpace(value)
+		case "name":
+			name = strings.TrimSpace(value)
+			nameLine = i
+		case "namespace":
+			namespace = strings.TrimSpace(value)
+		}
+	}
+	// Namespace substitution has already mapped the manager namespace to the release namespace.
+	if kind != "ServiceAccount" || nameLine < 0 ||
+		(namespace != "" && namespace != `""` && namespace != "null" && namespace != "{{ .Release.Namespace }}") {
+		return
+	}
+	if name == controllerManagerName || name == detectedPrefix+"-"+controllerManagerName ||
+		name == ResourceNameTemplate(chartName, controllerManagerName) {
+		colon := strings.IndexByte(lines[nameLine], ':')
+		lines[nameLine] = lines[nameLine][:colon+1] + ` {{ include "` + chartName + `.serviceAccountName" . }}`
+	}
+}
+
+// TemplateServiceAccountNameInDeployment templates spec.template.spec.serviceAccountName in a Deployment.
+// A label or selector with the same key is left unchanged.
 func TemplateServiceAccountNameInDeployment(detectedPrefix, chartName, yamlContent string) string {
-	replacement := `serviceAccountName: {{ include "` + chartName + `.serviceAccountName" . }}`
+	managerNames := []string{
+		ResourceNameTemplate(chartName, controllerManagerName),
+		detectedPrefix + "-" + controllerManagerName,
+		controllerManagerName,
+	}
 
-	// Handle already-templated resourceName (from substituteResourceNamesWithPrefix)
-	templatedPattern := regexp.MustCompile(
-		`(?m)^(\s*)serviceAccountName:\s+` +
-			regexp.QuoteMeta(`{{ include "`+chartName+`.resourceName" (dict "suffix" "controller-manager" "context" $) }}`))
-	yamlContent = templatedPattern.ReplaceAllString(yamlContent, `${1}`+replacement)
+	lines := strings.Split(yamlContent, "\n")
+	index := podSpecFieldIndex(lines, "serviceAccountName")
+	if index < 0 {
+		return yamlContent
+	}
+	_, value, _ := strings.Cut(strings.TrimSpace(lines[index]), ":")
+	if !slices.Contains(managerNames, strings.TrimSpace(value)) {
+		return yamlContent
+	}
+	indent, _ := LeadingWhitespace(lines[index])
+	lines[index] = indent + `serviceAccountName: {{ include "` + chartName + `.serviceAccountName" . }}`
+	return strings.Join(lines, "\n")
+}
 
-	// Handle literal names with prefix
-	serviceAccountPattern := regexp.MustCompile(
-		`(?m)^(\s*)serviceAccountName:\s+` + regexp.QuoteMeta(detectedPrefix) + `-controller-manager\s*$`)
-	yamlContent = serviceAccountPattern.ReplaceAllString(yamlContent, `${1}`+replacement)
-
-	// Handle literal names without prefix
-	serviceAccountPatternSimple := regexp.MustCompile(
-		`(?m)^(\s*)serviceAccountName:\s+controller-manager\s*$`)
-	yamlContent = serviceAccountPatternSimple.ReplaceAllString(yamlContent, `${1}`+replacement)
-
-	return yamlContent
+// podSpecFieldIndex returns the index of the line that sets spec.template.spec.<field>, or -1.
+func podSpecFieldIndex(lines []string, field string) int {
+	type pathKey struct {
+		indent int
+		name   string
+	}
+	var path []pathKey
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "{{") {
+			continue
+		}
+		_, indent := LeadingWhitespace(line)
+		for len(path) > 0 && path[len(path)-1].indent >= indent {
+			path = path[:len(path)-1]
+		}
+		name, _, found := strings.Cut(trimmed, ":")
+		if !found || strings.HasPrefix(trimmed, "-") {
+			// A list entry is never on the path to a pod spec field.
+			path = append(path, pathKey{indent: indent, name: "-"})
+			continue
+		}
+		if name == field && len(path) == 3 &&
+			path[0].name == "spec" && path[1].name == "template" && path[2].name == "spec" {
+			return i
+		}
+		path = append(path, pathKey{indent: indent, name: name})
+	}
+	return -1
 }
 
 // TemplateServiceAccount applies all ServiceAccount-specific transformations.

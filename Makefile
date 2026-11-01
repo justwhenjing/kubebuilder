@@ -21,6 +21,20 @@ include hack/rules/custom.mk
 
 .DEFAULT_GOAL := help
 
+#
+# Go.
+#
+# GO_VERSION is the toolchain used for builds and vulnerability scans.
+# Keep the go directive in go.mod at GO_DIRECTIVE_VERSION so library consumers
+# are not forced onto a newer patch (same split as Cluster API).
+# See: https://github.com/kubernetes-sigs/cluster-api/blob/main/Makefile
+GO_VERSION ?= 1.26.10
+GO_DIRECTIVE_VERSION ?= 1.26.0
+
+# Ensure the correct toolchain is used (overrides a newer local Go for scans/builds).
+GOTOOLCHAIN = go$(GO_VERSION)
+export GOTOOLCHAIN
+
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
 GOBIN=$(shell go env GOPATH)/bin
@@ -108,8 +122,17 @@ fix-docs: ## Fix documentation issues (accessibility + trailing spaces)
 	$(MAKE) remove-spaces
 
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter
+lint: golangci-lint lint-project-rules ## Run golangci-lint linter
 	$(GOLANGCI_LINT) run
+
+# The project's own lint rules live in hack/lint/ruleguard/rules.go, and
+# golangci-lint runs them through gocritic's ruleguard check. golangci-lint
+# checks only the default build, so this also runs them on the files tagged
+# //go:build integration. Add a new project rule to that file; it is checked
+# here with no other change.
+.PHONY: lint-project-rules
+lint-project-rules: golangci-lint ## Run the project's own lint rules on the files tagged integration too
+	$(GOLANGCI_LINT) run --build-tags=integration --enable-only gocritic
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
@@ -155,6 +178,16 @@ apidiff: go-apidiff ## Run the go-apidiff to verify any API differences compared
 go-apidiff:
 	$(call go-install-tool,$(GO_APIDIFF),github.com/joelanford/go-apidiff,$(GO_APIDIFF_VERSION))
 
+GOVULNCHECK_VERSION ?= v1.3.0
+
+.PHONY: govulncheck
+govulncheck: ## Run govulncheck (https://go.dev/doc/security/vuln/) against the module.
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
+.PHONY: go-version
+go-version: ## Print the Go toolchain version used for builds and scans
+	@echo $(GO_VERSION)
+
 ##@ Tests
 
 .PHONY: test
@@ -168,6 +201,22 @@ test-unit: ## Run the unit tests
 .PHONY: test-integration
 test-integration: install ## Run the integration tests (requires kubebuilder binary in PATH)
 	go test -race -tags=integration -timeout 30m $(TEST_PKGS)
+
+# Running every spec in random order ensures each spec sets up what it uses
+# and puts back what it changes. It catches a spec that passes only because
+# another one ran before it, and a spec that leaves something changed, such as
+# an empty HOME, that breaks the specs after it. Neither shows while the order
+# stays the same. TEST_PKGS leaves out the alpha update suite, as in the other
+# test targets, because it is heavy: it downloads old Kubebuilder release
+# binaries on every run. It installs Helm first, because the Helm plugin's
+# integration specs render the chart with `helm template` and skip themselves
+# when `helm` is not on PATH. A failure prints the seed; rerun it with
+# make test-random GINKGO_RANDOM_FLAGS="-ginkgo.randomize-all -ginkgo.seed=<seed>".
+GINKGO_RANDOM_FLAGS ?= -ginkgo.randomize-all
+.PHONY: test-random
+test-random: install install-helm ## Run the unit and integration tests with every Ginkgo spec in random order
+	go test -race $(TEST_PKGS) $(GINKGO_RANDOM_FLAGS)
+	go test -race -tags=integration -timeout 30m $(TEST_PKGS) $(GINKGO_RANDOM_FLAGS)
 
 .PHONY: test-coverage
 test-coverage: ## Run unit and integration tests with coverage report
@@ -209,6 +258,7 @@ test-book: ## Run the cronjob tutorial's unit tests to make sure we don't break 
 	cd ./docs/book/src/cronjob-tutorial/testdata/project && make test
 	cd ./docs/book/src/multiversion-tutorial/testdata/project && make test
 	cd ./docs/book/src/getting-started/testdata/project && make test
+	./hack/docs/test_webhook_certs.sh
 
 .PHONY: test-gomod
 test-gomod:  ## Run the Go module compatibility check
@@ -252,7 +302,7 @@ kube-linter: install-helm install-kube-linter ## Lint all Helm charts with kube-
 verify: verify-lint verify-license verify-sample-permissions verify-testdata verify-docs verify-helm ## Run all verification checks
 
 .PHONY: verify-lint
-verify-lint: verify-lint-config lint-fmt yamllint-yaml ## Run linting checks (config, format, YAML). Note: golangci-lint run is done via CI action for PR comments
+verify-lint: verify-lint-config lint-fmt yamllint-yaml lint-project-rules ## Run linting checks (config, format, YAML, project rules on integration files). Note: the full golangci-lint run is done via CI action for PR comments
 
 .PHONY: verify-lint-config
 verify-lint-config: golangci-lint ## Verify golangci-lint linter configuration

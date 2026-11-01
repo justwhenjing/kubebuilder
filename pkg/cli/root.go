@@ -65,6 +65,39 @@ func isCompletionRequest(cmd *cobra.Command) bool {
 	return cmd.Name() == cobra.ShellCompRequestCmd || cmd.Name() == cobra.ShellCompNoDescRequestCmd
 }
 
+// commandGroupAnnotation marks a command that only holds other subcommands.
+const commandGroupAnnotation = "kubebuilder.io/command-group"
+
+// asCommandGroup marks cmd as a command that only holds other subcommands and makes it display its
+// help, which does not use the project configuration.
+func asCommandGroup(cmd *cobra.Command) *cobra.Command {
+	if cmd.Annotations == nil {
+		cmd.Annotations = map[string]string{}
+	}
+	cmd.Annotations[commandGroupAnnotation] = "true"
+	cmd.RunE = runCommandGroup
+
+	return cmd
+}
+
+// isCommandGroup reports whether cmd was marked by asCommandGroup.
+func isCommandGroup(cmd *cobra.Command) bool {
+	_, isGroup := cmd.Annotations[commandGroupAnnotation]
+
+	return isGroup
+}
+
+// runCommandGroup displays the help of a command that only holds other subcommands. Cobra runs no
+// hook for a command that cannot run and displays its help instead, so a malformed command line
+// would be ignored.
+func runCommandGroup(cmd *cobra.Command, _ []string) error {
+	if err := cmd.Help(); err != nil {
+		return fmt.Errorf("failed to display help: %w", err)
+	}
+
+	return nil
+}
+
 // subcommandPath returns the subcommand names leading from the root command to cmd.
 func subcommandPath(cmd *cobra.Command) []string {
 	var path []string
@@ -74,6 +107,26 @@ func subcommandPath(cmd *cobra.Command) []string {
 	slices.Reverse(path)
 
 	return path
+}
+
+// isAliasOfExtraCommandWithConfig reports whether the command line names, by an alias, an extra
+// command that needs the configuration, such as a tool's docs aliased as version.
+func (c *CLI) isAliasOfExtraCommandWithConfig() bool {
+	positional := positionalArgs(c.args)
+	if len(positional) > 1 && positional[0] == kubebuilderSubcommandHelp {
+		positional = positional[1:]
+	}
+	if len(positional) == 0 {
+		return false
+	}
+
+	for _, cmd := range c.extraCommands {
+		if cmd.Name() != positional[0] && cmd.HasAlias(positional[0]) {
+			return !isSubcommandPathWithoutConfig([]string{cmd.Name()})
+		}
+	}
+
+	return false
 }
 
 // getShortKey converts a full plugin key to a short display key
@@ -163,8 +216,8 @@ func (c *CLI) checkCommandLine(cmd *cobra.Command, _ []string) error {
 		return c.flagErr
 	}
 
-	// Cobra resolved the command, so it is now known whether it consumes the configuration.
-	if isSubcommandPathWithoutConfig(subcommandPath(cmd)) {
+	// Cobra resolved the command, so decide by the command, not by the alias the user typed.
+	if isSubcommandPathWithoutConfig(subcommandPath(cmd)) || isCommandGroup(cmd) {
 		return nil
 	}
 	if c.configErr != nil {
@@ -177,13 +230,31 @@ func (c *CLI) checkCommandLine(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// checkCommandLineBeforeHooks makes checkCommandLine run before the persistent pre-run hook of the
-// command and of every command below it. Cobra runs only the nearest persistent pre-run hook, so an
-// extra command with a hook of its own would otherwise skip the check of the root command. That
-// hook still runs afterwards. Subcommands added after the CLI is built are not wrapped.
+// checkCommandLineBeforeHooks makes checkCommandLine run before the argument check and the
+// persistent pre-run hook of cmd and of every command below it. Cobra checks the arguments before
+// any hook and runs only the nearest persistent hook, so the root check would otherwise be skipped.
+// Subcommands added after the CLI is built are not wrapped.
 func (c *CLI) checkCommandLineBeforeHooks(cmd *cobra.Command) {
 	for _, subcommand := range cmd.Commands() {
 		c.checkCommandLineBeforeHooks(subcommand)
+	}
+
+	// Cobra runs no hook for a group with nothing to run, so make it a command group to report a
+	// malformed command line.
+	if c.flagErr != nil && !cmd.Runnable() {
+		asCommandGroup(cmd)
+	}
+
+	validateArgs := cmd.Args
+	cmd.Args = func(executed *cobra.Command, args []string) error {
+		if err := c.checkCommandLine(executed, args); err != nil {
+			return err
+		}
+		if validateArgs == nil {
+			return nil
+		}
+
+		return validateArgs(executed, args)
 	}
 
 	switch {
@@ -197,19 +268,44 @@ func (c *CLI) checkCommandLineBeforeHooks(cmd *cobra.Command) {
 			return ownHook(cmd, args)
 		}
 	case cmd.PersistentPreRun != nil:
-		ownHook := cmd.PersistentPreRun
-		// Cobra runs PersistentPreRunE instead of PersistentPreRun when both are set, so the hook
-		// moves there to keep running.
-		cmd.PersistentPreRun = nil
+		owner := cmd
+		// Cobra prefers PersistentPreRunE. Read the hook when the command runs, so a hook set later
+		// still runs.
 		cmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 			if err := c.checkCommandLine(cmd, args); err != nil {
 				return err
 			}
-			ownHook(cmd, args)
+			if owner.PersistentPreRun != nil {
+				owner.PersistentPreRun(cmd, args)
+
+				return nil
+			}
+
+			return c.runParentPersistentHook(owner, cmd, args)
+		}
+	}
+}
+
+// runParentPersistentHook runs the nearest persistent pre-run hook of a parent below the root, as
+// cobra does when a tool clears the hook of cmd after the CLI is built. With
+// cobra.EnableTraverseRunHooks, cobra already ran the parent hooks.
+func (c *CLI) runParentPersistentHook(owner, cmd *cobra.Command, args []string) error {
+	if cobra.EnableTraverseRunHooks {
+		return nil
+	}
+
+	for parent := owner.Parent(); parent != nil && parent != c.cmd; parent = parent.Parent() {
+		if parentHook := parent.PersistentPreRunE; parentHook != nil {
+			return parentHook(cmd, args)
+		}
+		if parent.PersistentPreRun != nil {
+			parent.PersistentPreRun(cmd, args)
 
 			return nil
 		}
 	}
+
+	return nil
 }
 
 // rootExamples builds the examples string for the root command before resolving plugins

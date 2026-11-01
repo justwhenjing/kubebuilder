@@ -49,16 +49,48 @@ func LeadingWhitespace(line string) (string, int) {
 	return line[:indentLen], indentLen
 }
 
+// controllerManagerName is the name suffix and control-plane label value of the manager.
+const controllerManagerName = "controller-manager"
+
+// blockScalarRegex matches a line whose value starts a multi-line block scalar, such as "key: |",
+// "key: >-" or "- |2". The first group is set when the scalar is a list item.
+var blockScalarRegex = regexp.MustCompile(`(?:(^\s*-)|:)\s+[|>][-+0-9]*\s*$`)
+
+// blockScalarLines reports, for each line, whether it is text inside a multi-line block scalar value:
+// a line after "key: |" that is blank or indented deeper than the key. Such lines are not YAML keys.
+func blockScalarLines(lines []string) []bool {
+	inside := make([]bool, len(lines))
+	parentIndent := -1
+	for i, line := range lines {
+		_, indent := LeadingWhitespace(line)
+		if parentIndent >= 0 && (strings.TrimSpace(line) == "" || indent > parentIndent) {
+			inside[i] = true
+			continue
+		}
+		parentIndent = -1
+		if match := blockScalarRegex.FindStringSubmatch(line); match != nil {
+			if match[1] != "" {
+				// "- |": the text sits deeper than the dash.
+				parentIndent = indent
+			} else {
+				// "key: |" or "- key: |": the text sits deeper than the key.
+				parentIndent = len(line) - len(strings.TrimLeft(line, " -"))
+			}
+		}
+	}
+	return inside
+}
+
 // IsManagerDeployment reports whether resource is the controller-manager Deployment.
 // Annotation is not checked — any extra Deployment may carry it, causing false positives.
 func IsManagerDeployment(resource *unstructured.Unstructured) bool {
-	if resource.GetLabels()["control-plane"] == "controller-manager" {
+	if resource.GetLabels()["control-plane"] == controllerManagerName {
 		return true
 	}
 	if names := ExtractContainerNames(resource); names["manager"] {
 		return true
 	}
-	return strings.Contains(resource.GetName(), "controller-manager")
+	return strings.Contains(resource.GetName(), controllerManagerName)
 }
 
 // wrapWebhookCertificateBlock wraps a webhook certificate block with its feature conditions.

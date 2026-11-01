@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 
+	"go.yaml.in/yaml/v3"
+
 	"sigs.k8s.io/kubebuilder/v4/pkg/plugins/optional/helm/v2alpha/internal/common"
 )
 
@@ -94,12 +96,17 @@ func CheckExistingLabels(lines []string, currentIndex int, indent string) (hasCh
 // AddStandardHelmLabels adds standard Helm labels to all labels sections except selectors.
 func AddStandardHelmLabels(yamlContent string) string {
 	lines := strings.Split(yamlContent, "\n")
+	inBlockScalar := blockScalarLines(lines)
 	result := make([]string, 0, len(lines)+10) // slack for the labels added below
 	inSelector := false
 
 	for i := range lines {
 		line := lines[i]
 		result = append(result, line)
+		// Lines of a multi-line value are text, not labels.
+		if inBlockScalar[i] {
+			continue
+		}
 
 		// Track if we're in a selector section (matchLabels or spec.selector for Services)
 		trimmed := strings.TrimSpace(line)
@@ -123,6 +130,9 @@ func AddStandardHelmLabels(yamlContent string) string {
 
 			isInLabelsSection := false
 			for j := i - 1; j >= 0 && j >= i-5; j-- {
+				if inBlockScalar[j] {
+					continue
+				}
 				if strings.TrimSpace(lines[j]) == common.YamlKeyLabels {
 					isInLabelsSection = true
 					break
@@ -278,7 +288,7 @@ func mergeMetadataMapBlock(merged, lines []string, headerIndex int, mapKey, valu
 	}
 
 	body := lines[bodyStart:bodyEnd]
-	existingKeys := extractKeysFromLines(body)
+	existingKeys := extractMapKeys(body)
 	if len(existingKeys) == 0 {
 		merged = append(merged, buildGuardedMetadataMapBlock(headerIndent, mapKey, valuePath)...)
 		return merged, bodyEnd - 1
@@ -290,6 +300,30 @@ func mergeMetadataMapBlock(merged, lines []string, headerIndex int, mapKey, valu
 	merged = appendHelmMapBlock(merged, valueIndent, valuePath, existingKeys)
 
 	return merged, bodyEnd - 1
+}
+
+// helmTemplateRegex matches a {{ }} action, including quoted strings containing {{ }}.
+var helmTemplateRegex = regexp.MustCompile(`\{\{(?:"(?:[^"\\]|\\.)*"|[^"}]|\}[^}])*\}\}`)
+
+// extractMapKeys extracts keys from a YAML map, replacing Helm actions with placeholders.
+func extractMapKeys(body []string) []string {
+	cleaned := make([]string, 0, len(body))
+	for _, line := range body {
+		cleaned = append(cleaned, helmTemplateRegex.ReplaceAllString(line, "x"))
+	}
+
+	var document yaml.Node
+	if err := yaml.Unmarshal([]byte(strings.Join(cleaned, "\n")), &document); err != nil ||
+		len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return extractKeysFromLines(body)
+	}
+
+	mapping := document.Content[0]
+	keys := make([]string, 0, len(mapping.Content)/2)
+	for i := 0; i < len(mapping.Content); i += 2 {
+		keys = append(keys, mapping.Content[i].Value)
+	}
+	return keys
 }
 
 // buildGuardedMetadataMapBlock renders a labels/annotations block wrapped in
@@ -306,19 +340,30 @@ func buildGuardedMetadataMapBlock(headerIndent int, mapKey, valuePath string) []
 	}
 }
 
+// appendAfterExistingEntries appends block after the existing entries in result. When they end with a
+// blank line, it ends a keep-chomped (|+) value: an unindented, untrimmed first action takes its
+// place and renders it back, where an indented "{{-" action would eat it.
+func appendAfterExistingEntries(result, block []string) []string {
+	if last := len(result) - 1; last >= 0 && strings.TrimSpace(result[last]) == "" {
+		result = result[:last]
+		block[0] = strings.Replace(strings.TrimLeft(block[0], " "), "{{- ", "{{ ", 1)
+	}
+	return append(result, block...)
+}
+
 // appendHelmMapBlock appends Helm template blocks for custom labels/annotations.
 func appendHelmMapBlock(result []string, indent, valuePath string, existingKeys []string) []string {
 	childIndentWidth := strconv.Itoa(len(indent))
 
 	if len(existingKeys) > 0 {
 		omitKeys := strings.Join(existingKeys, "\" \"")
-		return append(result,
-			indent+"{{- with "+valuePath+" }}",
-			indent+"{{- with omit . \""+omitKeys+"\" }}",
-			indent+"{{- toYaml . | nindent "+childIndentWidth+" }}",
-			indent+"{{- end }}",
-			indent+"{{- end }}",
-		)
+		return appendAfterExistingEntries(result, []string{
+			indent + "{{- with " + valuePath + " }}",
+			indent + "{{- with omit . \"" + omitKeys + "\" }}",
+			indent + "{{- toYaml . | nindent " + childIndentWidth + " }}",
+			indent + "{{- end }}",
+			indent + "{{- end }}",
+		})
 	}
 
 	return append(result,
@@ -334,15 +379,15 @@ func appendNestedHelmMapBlock(result []string, indent, outerPath, innerPath stri
 
 	if len(existingKeys) > 0 {
 		omitKeys := strings.Join(existingKeys, "\" \"")
-		return append(result,
-			indent+"{{- with "+outerPath+" }}",
-			indent+"{{- with "+innerPath+" }}",
-			indent+"{{- with omit . \""+omitKeys+"\" }}",
-			indent+"{{- toYaml . | nindent "+childIndentWidth+" }}",
-			indent+"{{- end }}",
-			indent+"{{- end }}",
-			indent+"{{- end }}",
-		)
+		return appendAfterExistingEntries(result, []string{
+			indent + "{{- with " + outerPath + " }}",
+			indent + "{{- with " + innerPath + " }}",
+			indent + "{{- with omit . \"" + omitKeys + "\" }}",
+			indent + "{{- toYaml . | nindent " + childIndentWidth + " }}",
+			indent + "{{- end }}",
+			indent + "{{- end }}",
+			indent + "{{- end }}",
+		})
 	}
 
 	return append(result,

@@ -75,6 +75,13 @@ kubebuilder edit --plugins=helm/v2-alpha \
   --output-dir=helm-charts
 ```
 
+<aside class="note" role="note">
+<p class="note-title">Migrating from helm/v1-alpha</p>
+
+Use [`kubebuilder alpha generate`][alpha-generate] to migrate from `helm/v1-alpha` to `helm/v2-alpha`. For supported projects, [`kubebuilder alpha update`][alpha-update] automates the upgrade with a 3-way merge to preserve your custom code.
+
+</aside>
+
 ## Chart structure
 
 The plugin generates a chart layout that mirrors your `config/` directory:
@@ -186,6 +193,8 @@ Install manually with all features enabled:
 $ helm install my-release ./dist/chart --namespace my-project-system --create-namespace
 ```
 
+`manager.enabled` (default: `true`) installs the manager Deployment. Set it to `false` to install only the CRDs, the RBAC, and the other resources that their own toggles enable. A `values.yaml` without this key still installs the manager.
+
 For charts without conversion webhooks, disable the manager and all optional
 components by setting all of these values to `false`:
 
@@ -235,6 +244,7 @@ Webhook and metrics certificates (`webhook-certs`, `metrics-certs`) are managed 
 #### `metrics.port`
 
 Set `metrics.port` to change the port used by the metrics endpoint. The chart applies the same value to the manager `--metrics-bind-address` argument, the metrics Service port and targetPort, and the metrics NetworkPolicy.
+If the input manager does not define a metrics bind-address argument, the chart adds one so this setting still controls the endpoint.
 
 For example, install the chart with the metrics endpoint on port `8444`:
 
@@ -246,7 +256,7 @@ The default is `8443`, detected from your project configuration.
 
 #### `metrics.secure`
 
-Control transport security and authentication for the metrics endpoint (default: `true`).
+Control transport security and authentication for the metrics endpoint (default: `true`, or `false` when the manager runs with `--metrics-secure=false`). The chart sets `--metrics-secure` on the manager from this value, so the flag is not kept in `manager.args`.
 
 When `true`:
 - Uses HTTPS with TLS certificates (when `certManager.enabled=true`)
@@ -277,17 +287,32 @@ helm install my-operator ./dist/chart --set webhook.port=9444
 
 The default is `9443`, detected from your project configuration. To disable the webhook server, set `webhook.enabled=false` instead of changing the port.
 
-### Health probe port configuration
+### Health probe address configuration
 
-Set `manager.healthProbe.port` to change the port where the manager serves its health probes. The liveness (`/healthz`) and readiness (`/readyz`) endpoints bind to this port. The chart applies the same value to the `--health-probe-bind-address` argument, the `health` container port, and the `httpGet` port of both probes.
+Set `manager.healthProbeBindAddress` to change the address where the manager serves its health probes, the liveness (`/healthz`) and readiness (`/readyz`) endpoints. The chart passes the value to the manager as `--health-probe-bind-address`, so you can set the host and the port together. The `health` container port takes the port of the address, and both probes use that named port.
 
 For example, install the chart with the health probes on port `8082`:
 
 ```bash
-helm install my-operator ./dist/chart --set manager.healthProbe.port=8082
+helm install my-operator ./dist/chart --set manager.healthProbeBindAddress=:8082
 ```
 
-The default is `8081`, detected from your project configuration.
+The value is detected from your project configuration, `:8081` for a scaffolded project. When it is empty, the chart passes no `--health-probe-bind-address` flag, the manager keeps its own default, and the container port and probes use `8081`. A project that sets an empty `--health-probe-bind-address=` gets `0`, since controller-runtime turns the server off for an empty address too.
+
+The kubelet sends the probes to the Pod IP, so keep the host empty or use one that covers it, such as `0.0.0.0`. With a loopback host such as `localhost` or `127.0.0.1`, the probes cannot reach the server.
+
+To turn the health probe server off, set the value to `0`. The chart then passes `--health-probe-bind-address=0` and renders neither the `health` container port nor the liveness and readiness probes, since nothing would answer them. Without probes, Kubernetes no longer restarts a manager that stops responding, and it sends traffic to the Pod before the manager is ready.
+
+```bash
+helm install my-operator ./dist/chart --set manager.healthProbeBindAddress=0
+```
+
+<aside class="note" role="note">
+<p class="note-title">Charts generated before `manager.healthProbeBindAddress`</p>
+
+Earlier versions of the plugin exposed only the port, as `manager.healthProbe.port`. Regenerating the chart without `--force` keeps your `values.yaml`, so that key stays but the new templates no longer read it, and the manager uses port `8081`. Move a custom port to `manager.healthProbeBindAddress`, for example `":8082"`, or regenerate with `--force`.
+
+</aside>
 
 ### Passing args for the manager
 
@@ -307,7 +332,7 @@ Helm evaluates `{{ .Release.Namespace }}` at render time, so the manager contain
 <aside class="note" role="note">
 <p class="note-title">Do not set the metrics, webhook, or health probe flags in manager.args</p>
 
-The chart already exposes `--metrics-bind-address`, `--webhook-port`, and `--health-probe-bind-address` as `metrics.port`, `webhook.port`, and `manager.healthProbe.port`. Set those values instead of adding the flags to `manager.args`. The plugin removes these flags from the extracted args when it generates the chart, so adding one back through `manager.args`, templated or not, creates a duplicate flag alongside the value-driven one. The Service, NetworkPolicy, and probes keep using the configured port, so traffic and probes then target the wrong port.
+The chart already exposes `--metrics-bind-address`, `--webhook-port`, and `--health-probe-bind-address` as `metrics.port`, `webhook.port`, and `manager.healthProbeBindAddress`. Set those values instead of adding the flags to `manager.args`. The plugin removes these flags from the extracted args when it generates the chart, so adding one back through `manager.args`, templated or not, creates a duplicate flag alongside the value-driven one. The Service, NetworkPolicy, and probes keep using the configured port, so traffic and probes then target the wrong port.
 
 </aside>
 
@@ -365,7 +390,7 @@ Helm merges this default into any values file that omits the section, so omittin
 
 When `serviceAccount.enabled: false`, `serviceAccount.name` is required and the chart fails to render without it. Set `name: default` explicitly to use the namespace default ServiceAccount.
 
-The resolved name is used consistently in the Deployment and in all RBAC bindings, for both cluster-scoped and namespaced RBAC modes:
+The resolved name is used consistently in the Deployment and in all RBAC bindings, for both cluster-scoped and namespaced RBAC modes. The manager ServiceAccount can appear anywhere in a binding's subjects list. ServiceAccounts in an explicitly different namespace do not use `serviceAccount.name`:
 
 | `serviceAccount.enabled` | `serviceAccount.name` | ServiceAccount created | Name used (Deployment + RBAC bindings) |
 |--------------------------|-----------------------|------------------------|----------------------------------------|
@@ -493,3 +518,6 @@ Optional fields in `values.yaml` use Helm conditionals. Comment them out to excl
 You can find example projects in [testdata/project-v4-with-plugins](https://github.com/kubernetes-sigs/kubebuilder/tree/master/testdata/project-v4-with-plugins).
 
 </aside>
+
+[alpha-generate]: ../../reference/commands/alpha_generate.md
+[alpha-update]: ../../reference/commands/alpha_update.md

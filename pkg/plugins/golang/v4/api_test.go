@@ -17,6 +17,8 @@ limitations under the License.
 package v4
 
 import (
+	"strings"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/spf13/pflag"
@@ -57,6 +59,7 @@ var _ = Describe("createAPISubcommand", func() {
 		subCmd.options = &goPlugin.Options{}
 		subCmd.resourceFlag = &pflag.Flag{Changed: true}
 		subCmd.controllerFlag = &pflag.Flag{Changed: true}
+		subCmd.ssaFlag = &pflag.Flag{}
 
 		res = &resource.Resource{
 			GVK: resource.GVK{
@@ -133,8 +136,66 @@ var _ = Describe("createAPISubcommand", func() {
 		},
 		Entry("when the flag is not provided for an API scaffolded with SSA", true, false, true),
 		Entry("when the flag is provided for an API scaffolded with SSA", true, true, true),
-		Entry("when the flag is provided for an API scaffolded without SSA", false, true, true),
 		Entry("when the flag is not provided for an API scaffolded without SSA", false, false, false),
+	)
+
+	It("should reject --ssa on a forced re-run of an API scaffolded without SSA", func() {
+		existing := *res
+		existing.API = &resource.API{CRDVersion: "v1", Namespaced: true}
+		Expect(cfg.AddResource(existing)).To(Succeed())
+
+		subCmd.force = true
+		subCmd.options.DoAPI = true
+		subCmd.options.Namespaced = true
+		subCmd.options.SSA = true
+		subCmd.ssaFlag.Changed = true
+
+		err := subCmd.InjectResource(res)
+		Expect(err).To(MatchError(ContainSubstring("unable to add '--ssa' to the existing API")))
+		saved, getErr := cfg.GetResource(res.GVK)
+		Expect(getErr).NotTo(HaveOccurred())
+		Expect(saved.API.SSA).To(BeFalse())
+	})
+
+	DescribeTable("should reject --ssa=false",
+		func(stored *resource.API) {
+			if stored != nil {
+				existing := *res
+				existing.API = stored
+				Expect(cfg.AddResource(existing)).To(Succeed())
+			}
+
+			subCmd.force = true
+			subCmd.options.DoAPI = true
+			subCmd.options.Namespaced = true
+			subCmd.options.SSA = false
+			subCmd.ssaFlag.Changed = true
+
+			err := subCmd.InjectResource(res)
+			Expect(err).To(MatchError(ContainSubstring("'--ssa=false' is not supported")))
+			if stored != nil {
+				saved, getErr := cfg.GetResource(res.GVK)
+				Expect(getErr).NotTo(HaveOccurred())
+				Expect(saved.API.SSA).To(Equal(stored.SSA))
+			}
+		},
+		Entry("for a new API", nil),
+		Entry("for an API scaffolded with SSA", &resource.API{CRDVersion: "v1", Namespaced: true, SSA: true}),
+		Entry("for an API scaffolded without SSA", &resource.API{CRDVersion: "v1", Namespaced: true}),
+	)
+
+	DescribeTable("should accept --ssa or no flag",
+		func(flagChanged, flagSSA bool) {
+			subCmd.options.DoAPI = true
+			subCmd.options.Namespaced = true
+			subCmd.options.SSA = flagSSA
+			subCmd.ssaFlag.Changed = flagChanged
+
+			Expect(subCmd.InjectResource(res)).To(Succeed())
+			Expect(res.API.SSA).To(Equal(flagSSA))
+		},
+		Entry("when the flag is not provided", false, false),
+		Entry("when --ssa is provided", true, true),
 	)
 
 	It("should not enable SSA for a new API when another one has it enabled", func() {
@@ -171,6 +232,29 @@ var _ = Describe("createAPISubcommand", func() {
 
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("requires '--external-api-path'"))
+	})
+
+	It("should reject an invalid controller name before updating the resource", func() {
+		subCmd.options.DoController = true
+		subCmd.options.ControllerName = "Not_A_Label"
+		Expect(subCmd.InjectResource(res)).To(MatchError(ContainSubstring("invalid '--controller-name'")))
+		Expect(res.HasController()).To(BeFalse())
+	})
+
+	It("should validate an existing external controller using the requested API domain", func() {
+		existing := res.Copy()
+		existing.Domain = "external.io"
+		existing.External = true
+		existing.Path = "example.com/external/api/v1"
+		existing.API = nil
+		existing.Controllers = &resource.Controllers{{Name: "captain"}}
+		Expect(cfg.AddResource(existing)).To(Succeed())
+
+		subCmd.options.DoController = true
+		subCmd.options.ExternalAPIPath = existing.Path
+		subCmd.options.ExternalAPIDomain = existing.Domain
+		Expect(subCmd.InjectResource(res)).To(Succeed())
+		Expect(res.GVK).To(Equal(existing.GVK))
 	})
 
 	It("should reject external-api-path with module version", func() {
@@ -279,6 +363,87 @@ var _ = Describe("createAPISubcommand", func() {
 		Expect(res.Path).To(Equal(externalPath))
 	})
 
+	Context("when several recorded resources share the Group/Version/Kind", func() {
+		const (
+			ioDomain    = "io"
+			k8sIODomain = "k8s.io"
+			ioPath      = "github.com/external/io/api/v1"
+			k8sIOPath   = "github.com/external/k8sio/api/v1"
+		)
+
+		BeforeEach(func() {
+			// A slice, not a map, so the recorded order (and the domains listed in errors) is fixed.
+			for _, variant := range []struct{ domain, path string }{
+				{ioDomain, ioPath},
+				{k8sIODomain, k8sIOPath},
+			} {
+				external := *res
+				external.Domain = variant.domain
+				external.External = true
+				external.Path = variant.path
+				external.API = nil
+				Expect(cfg.AddResource(external)).To(Succeed())
+			}
+
+			// resolveDomain keeps the project domain when several records match.
+			subCmd.options.DoAPI = false
+			subCmd.options.DoController = true
+		})
+
+		DescribeTable("should select the entry named by --external-api-domain",
+			func(externalPath string) {
+				subCmd.options.ExternalAPIDomain = k8sIODomain
+				subCmd.options.ExternalAPIPath = externalPath
+
+				Expect(subCmd.InjectResource(res)).To(Succeed())
+				Expect(res.Domain).To(Equal(k8sIODomain))
+				Expect(res.External).To(BeTrue())
+				Expect(res.Path).To(Equal(k8sIOPath))
+			},
+			Entry("without --external-api-path", ""),
+			Entry("with the recorded --external-api-path", k8sIOPath),
+		)
+
+		It("should refuse without --external-api-domain instead of adding a project-domain entry", func() {
+			err := subCmd.InjectResource(res)
+
+			Expect(err).To(MatchError(ContainSubstring("match more than one resource (domains: io, k8s.io)")))
+			Expect(err).To(MatchError(ContainSubstring("pass --external-api-domain")))
+			Expect(res.Domain).To(Equal(testIO))
+		})
+
+		It("should refuse an --external-api-domain that matches no recorded entry", func() {
+			subCmd.options.ExternalAPIDomain = "example.org"
+
+			err := subCmd.InjectResource(res)
+
+			Expect(err).To(MatchError(ContainSubstring(`no resource matches --external-api-domain "example.org"`)))
+		})
+
+		It("should add a new external variant when given a new domain and --external-api-path", func() {
+			const newPath = "github.com/external/org/api/v1"
+			subCmd.options.ExternalAPIDomain = "example.org"
+			subCmd.options.ExternalAPIPath = newPath
+
+			Expect(subCmd.InjectResource(res)).To(Succeed())
+			Expect(res.Domain).To(Equal("example.org"))
+			Expect(res.External).To(BeTrue())
+			Expect(res.Path).To(Equal(newPath))
+		})
+
+		It("should select the project API when one shares the Group/Version/Kind", func() {
+			project := *res
+			project.Path = resource.APIPackagePath(cfg.GetRepository(), res.Group, res.Version, false)
+			project.API = &resource.API{CRDVersion: "v1", Namespaced: true}
+			Expect(cfg.AddResource(project)).To(Succeed())
+
+			Expect(subCmd.InjectResource(res)).To(Succeed())
+			Expect(res.Domain).To(Equal(testIO))
+			Expect(res.External).To(BeFalse())
+			Expect(res.Path).To(Equal(project.Path))
+		})
+	})
+
 	It("should return an actionable error for --resource=false on old project with relative external path", func() {
 		// Simulate an old PROJECT file that stored a relative path instead of a Go import path
 		existingExternal := *res
@@ -374,4 +539,203 @@ var _ = Describe("createAPISubcommand", func() {
 
 		Expect(subCmd.InjectResource(res)).To(Succeed())
 	})
+})
+
+var _ = Describe("validateController", func() {
+	const (
+		captainCtrl   = "captain"
+		captainBackup = "captain-backup"
+	)
+
+	var (
+		cfg config.Config
+		gvk resource.GVK
+	)
+
+	BeforeEach(func() {
+		cfg = cfgv3.New()
+		Expect(cfg.SetRepository("test")).To(Succeed())
+		gvk = resource.GVK{Group: crewGroup, Domain: testIO, Version: "v1", Kind: captainKind}
+	})
+
+	stored := func(controllers *resource.Controllers, legacy bool) {
+		res := resource.Resource{GVK: gvk, Plural: captains, Controllers: controllers}
+		res.Controller = legacy //nolint:staticcheck // simulating an unmigrated PROJECT file
+		Expect(cfg.AddResource(res)).To(Succeed())
+	}
+
+	subcommand := func(name string, doAPI bool) *createAPISubcommand {
+		return &createAPISubcommand{
+			config:   cfg,
+			resource: &resource.Resource{GVK: gvk, Plural: captains},
+			options:  &goPlugin.Options{DoController: true, ControllerName: name, DoAPI: doAPI},
+		}
+	}
+
+	It("should skip validation when no controller is requested", func() {
+		stored(&resource.Controllers{{Name: captainCtrl}}, false)
+		p := subcommand("", false)
+		p.options.DoController = false
+
+		Expect(p.validateController()).To(Succeed())
+	})
+
+	It("should accept any name when the resource does not exist yet", func() {
+		Expect(subcommand(captainBackup, false).validateController()).To(Succeed())
+	})
+
+	It("should accept a new name on a resource that already has controllers", func() {
+		stored(&resource.Controllers{{Name: captainCtrl}}, false)
+
+		Expect(subcommand(captainBackup, false).validateController()).To(Succeed())
+	})
+
+	It("should reject a name already recorded", func() {
+		stored(&resource.Controllers{{Name: captainCtrl}}, false)
+
+		Expect(subcommand(captainCtrl, false).validateController()).NotTo(Succeed())
+	})
+
+	It("should reject a name already recorded through the legacy field", func() {
+		stored(nil, true)
+
+		Expect(subcommand(captainCtrl, false).validateController()).NotTo(Succeed())
+	})
+
+	It("should reject a name generating an existing reconciler", func() {
+		stored(&resource.Controllers{{Name: captainBackup}}, false)
+
+		Expect(subcommand("captain--backup", false).validateController()).NotTo(Succeed())
+	})
+
+	It("should allow re-scaffolding the single default controller without a name", func() {
+		stored(&resource.Controllers{{Name: captainCtrl}}, false)
+
+		Expect(subcommand("", false).validateController()).To(Succeed())
+	})
+
+	It("should require a name when the resource has several controllers", func() {
+		stored(&resource.Controllers{{Name: captainCtrl}, {Name: captainBackup}}, false)
+
+		Expect(subcommand("", false).validateController()).NotTo(Succeed())
+	})
+
+	It("should require a name when the only controller is not the default", func() {
+		stored(&resource.Controllers{{Name: captainBackup}}, false)
+
+		Expect(subcommand("", false).validateController()).NotTo(Succeed())
+	})
+
+	It("should allow omitting the name while recreating the API", func() {
+		stored(&resource.Controllers{{Name: captainCtrl}, {Name: captainBackup}}, false)
+
+		Expect(subcommand("", true).validateController()).To(Succeed())
+	})
+})
+
+var _ = Describe("validateController across resources", func() {
+	const (
+		admiralCtrl   = "admiral"
+		admiralKind   = "Admiral"
+		admiralPlural = "admirals"
+	)
+
+	var (
+		cfg        config.Config
+		captainGVK resource.GVK
+	)
+
+	BeforeEach(func() {
+		cfg = cfgv3.New()
+		Expect(cfg.SetRepository("test")).To(Succeed())
+		captainGVK = resource.GVK{Group: crewGroup, Domain: testIO, Version: "v1", Kind: captainKind}
+
+		Expect(cfg.AddResource(resource.Resource{
+			GVK:         resource.GVK{Group: crewGroup, Domain: testIO, Version: "v1", Kind: admiralKind},
+			Plural:      admiralPlural,
+			Controllers: &resource.Controllers{{Name: admiralCtrl}},
+		})).To(Succeed())
+	})
+
+	subcommand := func(name string) *createAPISubcommand {
+		return &createAPISubcommand{
+			config:   cfg,
+			resource: &resource.Resource{GVK: captainGVK, Plural: captains},
+			options:  &goPlugin.Options{DoController: true, ControllerName: name},
+		}
+	}
+
+	It("should reject a name generating another resource's reconciler", func() {
+		err := subcommand(admiralCtrl).validateController()
+
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("AdmiralReconciler"))
+	})
+
+	It("should accept a name that does not collide", func() {
+		Expect(subcommand("captain-backup").validateController()).To(Succeed())
+	})
+
+	It("should reject a shared filename even when reconciler capitalization differs", func() {
+		existing := resource.Resource{
+			GVK:    resource.GVK{Group: crewGroup, Domain: testIO, Version: "v1", Kind: "MyKind"},
+			Plural: "mykinds", Controllers: &resource.Controllers{{Name: "mykind"}},
+		}
+		Expect(cfg.AddResource(existing)).To(Succeed())
+		Expect(subcommand("mykind").validateController()).To(
+			MatchError(ContainSubstring("mykind_controller.go")))
+	})
+
+	It("should reject the default name when another version of the kind already has it", func() {
+		p := subcommand("")
+		p.resource = &resource.Resource{
+			GVK:    resource.GVK{Group: crewGroup, Domain: testIO, Version: "v2", Kind: admiralKind},
+			Plural: admiralPlural,
+		}
+
+		err := p.validateController()
+
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("AdmiralReconciler"))
+	})
+
+	It("should accept a second version of a kind that names its controller", func() {
+		p := subcommand("admiral-v2")
+		p.resource = &resource.Resource{
+			GVK:    resource.GVK{Group: crewGroup, Domain: testIO, Version: "v2", Kind: admiralKind},
+			Plural: admiralPlural,
+		}
+
+		Expect(p.validateController()).To(Succeed())
+	})
+
+	It("should allow the same name in another group of a multigroup project", func() {
+		Expect(cfg.SetMultiGroup()).To(Succeed())
+		p := subcommand(admiralCtrl)
+		p.resource.Group = shipGroup
+
+		Expect(p.validateController()).To(Succeed())
+	})
+
+	It("should still reject it within the same group of a multigroup project", func() {
+		Expect(cfg.SetMultiGroup()).To(Succeed())
+
+		Expect(subcommand(admiralCtrl).validateController()).NotTo(Succeed())
+	})
+})
+
+var _ = Describe("default controller name", func() {
+	// Kinds and default controller names use the same DNS-1035 validation rules.
+	DescribeTable("should be valid for every kind GVK.Validate accepts",
+		func(kind string) {
+			gvk := resource.GVK{Group: crewGroup, Domain: testIO, Version: "v1", Kind: kind}
+			Expect(gvk.Validate()).To(Succeed())
+
+			name := resource.DefaultControllerName(kind)
+			Expect(resource.Controller{Name: name}.Validate()).To(Succeed())
+		},
+		Entry("a short kind", captainKind),
+		Entry("a kind with digits", "Captain2"),
+		Entry("a kind at the 63 character limit", "C"+strings.Repeat("a", 62)),
+	)
 })
